@@ -1,26 +1,19 @@
-// Placeholder shell. The real navigation and views come from the UI/UX spec (TELE-71).
+"use client";
 
-const API_BASE = process.env.PISCES_API_URL ?? "http://127.0.0.1:8787";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { Gate } from "../components/bits";
+import { useSession } from "../components/session";
 
-async function getHealth(): Promise<string> {
-  try {
-    const res = await fetch(`${API_BASE}/api/health`, { cache: "no-store" });
-    if (!res.ok) return `backend responded ${res.status}`;
-    const body = (await res.json()) as { status?: string };
-    return `backend ${body.status ?? "unknown"}`;
-  } catch {
-    return "backend unreachable";
+export default function Home() {
+  const session = useSession();
+  const router = useRouter();
+  useEffect(() => {
+    if (session.status === "in") router.replace("/endpoints");
+    if (session.status === "out") router.replace(session.ended ? "/login?ended=1" : "/login");
+  }, [session, router]);
+  if (session.status === "error") {
+    return <Gate title="The API did not answer within 10 seconds." onRetry={() => void session.refresh()} />;
   }
-}
-
-export default async function Home() {
-  const health = await getHealth();
-
-  return (
-    <main style={{ fontFamily: "system-ui, sans-serif", padding: "3rem", maxWidth: 720 }}>
-      <h1 style={{ margin: 0 }}>Pisces</h1>
-      <p>Scaffold only — views land after the layout spec is approved.</p>
-      <p style={{ color: health.startsWith("backend ok") ? "#0a7" : "#b00" }}>{health}</p>
-    </main>
-  );
+  return <Gate title="Checking session" />;
 }
