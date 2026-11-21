@@ -1,33 +1,38 @@
-//! Pisces backend — authenticated control plane for Docker and Kubernetes.
-//!
-//! Scope of this commit: scaffold only. No auth, no Docker/Kubernetes endpoints yet.
-//! The dependencies below are wired in just far enough that `cargo check` proves the
-//! picked versions compile and that the two clients can be constructed.
+//! Pisces backend — authenticated Docker control, Kubernetes context names only.
 
+mod auth;
 mod docker;
+mod error;
+mod http;
 mod k8s;
+mod page;
+mod store;
 
-use axum::{routing::get, Json, Router};
-use serde::Serialize;
-
-#[derive(Serialize)]
-struct Health {
-    status: &'static str,
-    docker: String,
-    kubernetes: String,
-}
-
-async fn health() -> Json<Health> {
-    Json(Health {
-        status: "ok",
-        docker: docker::describe(),
-        kubernetes: k8s::describe().await,
-    })
-}
+use std::io::{self, Read};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 #[tokio::main]
 async fn main() {
-    let app = Router::new().route("/api/health", get(health));
+    if std::env::args().nth(1).as_deref() == Some("hash-password") {
+        hash_password_cli();
+        return;
+    }
+
+    let auth = auth::load_from_env().unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(1);
+    });
+    let dir = std::env::var("PISCES_DATA_DIR").unwrap_or_else(|_| "data".to_string());
+    let store = store::Store::open(PathBuf::from(dir)).unwrap_or_else(|message| {
+        eprintln!("{message}");
+        std::process::exit(1);
+    });
+    let state = http::AppState {
+        auth,
+        store: Arc::new(Mutex::new(store)),
+    };
+    let app = http::router(state);
 
     let addr = std::env::var("PISCES_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -35,4 +40,23 @@ async fn main() {
         .unwrap_or_else(|e| panic!("cannot bind {addr}: {e}"));
     println!("pisces backend listening on http://{addr}");
     axum::serve(listener, app).await.expect("server failed");
+}
+
+fn hash_password_cli() {
+    let mut password = String::new();
+    io::stdin()
+        .read_to_string(&mut password)
+        .expect("could not read stdin");
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        eprintln!("password was empty");
+        std::process::exit(1);
+    }
+    match auth::hash_password(password) {
+        Ok(hash) => println!("{hash}"),
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    }
 }

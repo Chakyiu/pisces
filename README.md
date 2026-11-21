@@ -4,8 +4,9 @@ A Portainer-like web app for managing Docker and Kubernetes: a **Next.js** front
 **Rust** backend that provides authenticated API control over the Docker daemon and the
 Kubernetes API.
 
-This repository is the scaffold only. Layout, views and the API surface are decided by the
-UI/UX spec first (TELE-71); the first working Docker slice follows in TELE-73.
+The Docker slice (TELE-73) is the working console: sign in, add this machine's engine, and
+start, stop, inspect, and remove containers, plus images, volumes, and networks.
+Kubernetes views are present in the shell and wait on TELE-74.
 
 ## Layout
 
@@ -23,22 +24,29 @@ frontend/   Next.js App Router app (TypeScript)
 
 ## Dev loop (Windows, two terminals)
 
-Backend, from `backend/` — listens on `http://127.0.0.1:8787`:
+Backend, from `backend/` — listens on `http://127.0.0.1:8787`. Set the three variables
+in the shell before `cargo run`. Do not commit them.
+
+- `PISCES_USERNAME` — the single operator name
+- `PISCES_PASSWORD_HASH` — argon2 PHC string from `cargo run -- hash-password` (password on stdin)
+- `PISCES_JWT_SECRET` — 32 or more characters, used only to sign the session cookie
 
 ```powershell
+cargo run -- hash-password
 cargo run
 ```
 
-Frontend, from `frontend/` — listens on `http://localhost:3000`:
+Frontend, from `frontend/` — listens on `http://localhost:3000`. The browser talks to
+`/api/*` on that origin; Next proxies to `PISCES_API_URL` (default `http://127.0.0.1:8787`)
+so the session cookie stays on port 3000.
 
 ```powershell
 npm install
 npm run dev
 ```
 
-The home page calls the backend's `/api/health` and shows whether it is reachable. The
-frontend server reads the backend base URL from `PISCES_API_URL` (default
-`http://127.0.0.1:8787`).
+Open `http://localhost:3000`, sign in, and add a Docker endpoint named `local`. The engine
+is always this machine. Endpoint names are stored in `PISCES_DATA_DIR` (default `data/`).
 
 Checks:
 
@@ -58,13 +66,11 @@ Client construction is lazy, so a stopped daemon breaks requests, not startup.
 no cluster is assumed. The API snapshot is pinned via the `k8s-openapi` feature so types do
 not drift under us.
 
-**Auth (decided, not implemented).** Local password hash with `argon2` 0.6.0, and a
-short-lived bearer JWT with `jsonwebtoken` 12.0.0 carried in an httpOnly cookie. No auth
-code, no secrets and no `.env` file are committed; configuration is read from the
-environment and real values live outside the repository.
-
-`argon2` and `jsonwebtoken` are pinned but unused until auth lands, so `cargo check`
-reports two `unused dependency` warnings — expected at this stage.
+**Auth.** Local password hash with `argon2` 0.6.0, and an 8-hour bearer JWT with
+`jsonwebtoken` 12.0.0 in the httpOnly cookie `pisces_session` (`SameSite=Lax`, not
+`Secure`, because the dev console is plain HTTP on localhost). `POST /api/session` signs
+in, `DELETE /api/session` signs out, and every other `/api` route except `GET /api/health`
+rejects a missing or bad cookie with 401. No secret file is committed.
 
 ## Secrets
 

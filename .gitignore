@@ -17,6 +17,9 @@ Cargo.lock.orig
 .env.*
 !.env.example
 
+# local endpoint list (names only; never secrets)
+data/
+
 # os / editor
 .DS_Store
 Thumbs.db
