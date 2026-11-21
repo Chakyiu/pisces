@@ -8,6 +8,20 @@ The Docker slice (TELE-73) is the working console: sign in, add this machine's e
 start, stop, inspect, and remove containers, plus images, volumes, and networks.
 Kubernetes views are present in the shell and wait on TELE-74.
 
+## Deploy
+
+One Linux image runs the UI and the API. Publish port 3000, mount the engine socket, and give the container a username and password:
+
+```
+docker run -d --name pisces --restart unless-stopped -p 3000:3000 -v /var/run/docker.sock:/var/run/docker.sock -v pisces-data:/data -e PISCES_USERNAME=admin -e PISCES_PASSWORD=choose-a-password ghcr.io/chakyiu/pisces:latest
+```
+
+Open `http://localhost:3000` and sign in with those values. The API inside the image listens only on `127.0.0.1:8787`; the UI proxies `/api`. The process runs as root so it can use the socket. Endpoint names are stored in the `pisces-data` volume, and the first start writes a session signing key there so restarts keep sessions. `PISCES_PASSWORD` stays on the container and shows up in `docker inspect`.
+
+`docker build -t pisces .` from this repo builds the same image. Use `pisces` in the command above instead of `ghcr.io/chakyiu/pisces:latest`.
+
+Pushes to `main` publish `ghcr.io/chakyiu/pisces:latest` and `ghcr.io/chakyiu/pisces:sha-<short>`. A `vX.Y.Z` git tag also publishes that version and `X.Y`.
+
 ## Layout
 
 ```
