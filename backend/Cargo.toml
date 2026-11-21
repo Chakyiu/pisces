@@ -1,0 +1,23 @@
+[package]
+name = "pisces-backend"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# HTTP layer
+axum = "0.8.9"
+tokio = { version = "1.54.1", features = ["full"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# Docker daemon client. Windows: named pipe //./pipe/docker_engine.
+bollard = "=0.21.1"
+
+# Kubernetes client, API types only (no cluster is assumed to exist).
+kube = "=5.1.0"
+k8s-openapi = { version = "=0.29.0", features = ["v1_34"] }
+
+# Auth (not implemented yet): argon2 password hash, jsonwebtoken HS256 JWT.
+jsonwebtoken = "=12.0.0"
+argon2 = "=0.6.0"

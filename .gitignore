@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+next.config.mjs.bak
+*.tsbuildinfo
+
+# rust
+target/
+Cargo.lock.orig
+
+# env / secrets
+.env
+.env.*
+!.env.example
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
