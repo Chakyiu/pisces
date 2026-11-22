@@ -108,11 +108,22 @@ struct VolumeBody {
 }
 
 #[derive(Deserialize)]
+struct ContainerSettingsBody {
+    name: String,
+    restart_policy: String,
+    restart_maximum_retry_count: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct DuplicateBody {
     name: String,
     image: Option<String>,
-    env: Option<Vec<String>>,
+    command: Option<Vec<String>>,
+    entrypoint: Option<Vec<String>>,
+    env: Option<Vec<docker::EnvOut>>,
+    labels: Option<Vec<docker::LabelOut>>,
     ports: Option<Vec<String>>,
+    mounts: Option<Vec<docker::MountEdit>>,
     restart_policy: Option<String>,
 }
 
@@ -125,6 +136,26 @@ struct NetworkBody {
 fn take_json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
     body.map(|Json(value)| value)
         .map_err(|_| ApiError::validation("The request body is not valid."))
+}
+
+fn safe_container_edit_error(error: ApiError) -> ApiError {
+    if error.message_is_safe
+        || error.message == "Recreate recovery incomplete: inspect container state before retrying."
+    {
+        return error;
+    }
+    match error.status {
+        axum::http::StatusCode::BAD_REQUEST => ApiError::validation(
+            "Container configuration is invalid. Environment values are excluded from errors.",
+        ),
+        axum::http::StatusCode::NOT_FOUND => ApiError::not_found("Container not found."),
+        axum::http::StatusCode::CONFLICT => {
+            ApiError::conflict("Container edit conflicts with an existing Docker resource.")
+        }
+        _ => ApiError::daemon(
+            "Container edit failed. Check container state before retrying; environment values are excluded from errors.",
+        ),
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -174,6 +205,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/endpoints/{id}/containers/{container_id}/config",
             get(container_config),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/settings",
+            axum::routing::put(update_container_settings),
         )
         .route(
             "/api/endpoints/{id}/containers/{container_id}/duplicate",
@@ -707,6 +742,24 @@ async fn container_config(
     Ok(Json(docker::container_config(container_id).await?))
 }
 
+async fn update_container_settings(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+    body: Result<Json<ContainerSettingsBody>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let body = take_json(body)?;
+    require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?;
+    docker::update_container_settings(
+        container_id,
+        Some(&body.name),
+        Some(&body.restart_policy),
+        body.restart_maximum_retry_count,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn duplicate_container(
     State(state): State<AppState>,
     Path((id, container_id)): Path<(String, String)>,
@@ -718,12 +771,18 @@ async fn duplicate_container(
     let name = docker::checked_container_name(&body.name)?;
     let edits = docker::ContainerEdits {
         image: body.image,
+        command: body.command,
+        entrypoint: body.entrypoint,
         env: body.env,
+        labels: body.labels,
         ports: body.ports,
+        mounts: body.mounts,
         restart: body.restart_policy,
     };
     // Keeping the original name is Portainer's "Duplicate/Edit" replace path.
-    let created = docker::duplicate_or_replace(source, &name, &edits).await?;
+    let created = docker::duplicate_or_replace(source, &name, &edits)
+        .await
+        .map_err(safe_container_edit_error)?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -897,6 +956,34 @@ mod console_tests {
             HeaderValue::from_static("pisces.example:3000"),
         );
         assert!(!websocket_same_origin(&missing_origin));
+    }
+
+    #[test]
+    fn container_edit_errors_never_echo_engine_details() {
+        let error = safe_container_edit_error(ApiError::daemon("engine echoed SECRET_VALUE"));
+        assert!(!error.message.contains("SECRET_VALUE"));
+
+        for message in [
+            "Port mapping must use host:container and an optional /tcp, /udp or /sctp.",
+            "Each mount needs an absolute container destination.",
+        ] {
+            assert_eq!(
+                safe_container_edit_error(ApiError::validation(message)).message,
+                message
+            );
+        }
+
+        let unsafe_validation =
+            safe_container_edit_error(ApiError::unsafe_validation("engine echoed SECRET_VALUE"));
+        assert!(!unsafe_validation.message.contains("SECRET_VALUE"));
+
+        let recovery = safe_container_edit_error(ApiError::daemon(
+            "Recreate recovery incomplete: inspect container state before retrying.",
+        ));
+        assert_eq!(
+            recovery.message,
+            "Recreate recovery incomplete: inspect container state before retrying."
+        );
     }
 
     #[test]

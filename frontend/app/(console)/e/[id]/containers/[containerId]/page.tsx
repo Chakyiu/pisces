@@ -3,11 +3,12 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
-import { blank, portList, shortId, stamp } from "../../../../../../lib/format";
+import { blank, portList, stamp } from "../../../../../../lib/format";
 import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerConsole } from "../../../../../../components/container-console";
 import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
+import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
 
@@ -59,6 +60,7 @@ function Body({
   const [confirm, setConfirm] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
 
   async function load(retry: boolean) {
@@ -179,6 +181,9 @@ function Body({
             <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
               <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
             </button>
+            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
+              Edit name / restart
+            </button>
             <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
               <Icon name="copy" /> Duplicate/Edit
             </button>
@@ -204,15 +209,19 @@ function Body({
       <section className="widget">
         <h2>Details</h2>
         <div className="facts">
-          <Fact label="ID" value={shortId(detail.id)} title={detail.id} mono />
+          <Fact label="ID" value={detail.id} mono />
           <Fact label="Image" value={detail.image} mono />
           <Fact label="Command" value={blank(detail.command)} mono />
-          <Fact label="Restart" value={detail.restartPolicy || "no"} />
+          <Fact label="Entrypoint" value={blank(detail.entrypoint)} mono />
+          <Fact label="Restart" value={`${detail.restartPolicy || "no"}${detail.restartMaximumRetryCount == null ? "" : ` · ${detail.restartMaximumRetryCount} retries`}`} />
           <Fact label="Ports" value={portList(detail.ports)} mono />
           <Fact label="Mounts" value={mounts} />
           <Fact label="Networks" value={networks} />
-          <Fact label="Env" value={detail.envCount ? `${detail.envCount} hidden` : "None"} />
+          <MaskedEnvironment items={detail.env} />
+          <Fact label="Labels" value={detail.labels.length ? detail.labels.map(({ key, value }) => `${key} = ${value}`).join("\n") : "None"} mono />
+          <Fact label="Image ID" value={detail.imageId} mono />
           <Fact label="Created" value={stamp(detail.created)} mono />
+          <Fact label="Started" value={stamp(detail.started)} mono />
         </div>
       </section>
       {confirm ? (
@@ -246,6 +255,20 @@ function Body({
           </div>
         </Dialog>
       ) : null}
+      {settingsOpen ? (
+        <ContainerSettingsDialog
+          endpointId={endpointId}
+          containerId={containerId}
+          name={detail.name}
+          restartPolicy={detail.restartPolicy}
+          retryCount={detail.restartMaximumRetryCount}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => {
+            setSettingsOpen(false);
+            void load(false);
+          }}
+        />
+      ) : null}
       {editOpen ? (
         <ContainerDuplicateDialog
           endpointId={endpointId}
@@ -266,6 +289,26 @@ function Fact({ label, value, mono, title }: { label: string; value: string; mon
     <div className="fact">
       <span>{label}</span>
       <strong className={mono ? "mono" : undefined} title={title ?? value}>{value}</strong>
+    </div>
+  );
+}
+
+function MaskedEnvironment({ items }: { items: ContainerDetail["env"] }) {
+  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+  return (
+    <div className="fact fact-multiline">
+      <span>Env</span>
+      <div className="env-list">
+        {items.length ? items.map(({ key, value }, index) => (
+          <div className="env-row" key={`${key}-${index}`}>
+            <code>{key}</code>
+            <code className="env-value">{revealed[index] ? value || "(empty)" : "••••••••"}</code>
+            <button className="btn" type="button" aria-label={`${revealed[index] ? "Hide" : "Reveal"} ${key}`} onClick={() => setRevealed((current) => ({ ...current, [index]: !current[index] }))}>
+              {revealed[index] ? "Hide" : "Reveal"}
+            </button>
+          </div>
+        )) : <strong>None</strong>}
+      </div>
     </div>
   );
 }

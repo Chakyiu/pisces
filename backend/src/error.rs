@@ -11,6 +11,7 @@ pub struct ApiError {
     pub code: &'static str,
     pub message: String,
     pub retryable: bool,
+    pub message_is_safe: bool,
 }
 
 impl ApiError {
@@ -20,6 +21,7 @@ impl ApiError {
             code: "unauthorized",
             message: message.into(),
             retryable: false,
+            message_is_safe: false,
         }
     }
 
@@ -29,6 +31,14 @@ impl ApiError {
             code: "validation",
             message: message.into(),
             retryable: false,
+            message_is_safe: true,
+        }
+    }
+
+    pub fn unsafe_validation(message: impl Into<String>) -> Self {
+        Self {
+            message_is_safe: false,
+            ..Self::validation(message)
         }
     }
 
@@ -38,6 +48,7 @@ impl ApiError {
             code: "conflict",
             message: message.into(),
             retryable: false,
+            message_is_safe: false,
         }
     }
 
@@ -47,6 +58,7 @@ impl ApiError {
             code: "in_use",
             message: message.into(),
             retryable: false,
+            message_is_safe: false,
         }
     }
 
@@ -56,6 +68,7 @@ impl ApiError {
             code: "not_found",
             message: message.into(),
             retryable: false,
+            message_is_safe: false,
         }
     }
 
@@ -65,6 +78,7 @@ impl ApiError {
             code: "daemon_unreachable",
             message: message.into(),
             retryable: true,
+            message_is_safe: false,
         }
     }
 
@@ -74,6 +88,7 @@ impl ApiError {
             code: "cluster_unreachable",
             message: message.into(),
             retryable: true,
+            message_is_safe: false,
         }
     }
 }

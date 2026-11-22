@@ -25,9 +25,12 @@ function trim(value: number): string {
 }
 
 export function portList(ports: Port[]): string {
-  const published = ports.filter((port) => port.host);
-  if (published.length === 0) return "—";
-  return published.map((port) => `${port.host} → ${port.container}/${port.protocol}`).join(", ");
+  if (ports.length === 0) return "—";
+  return ports.map((port) => {
+    const hostIp = port.hostIp ? `${port.hostIp}:` : "";
+    const host = port.host ? `${hostIp}${port.host} → ` : "";
+    return `${host}${port.container}/${port.protocol}${port.host ? "" : " (exposed)"}`;
+  }).join(", ");
 }
 
 export function stamp(iso: string | null | undefined): string {
