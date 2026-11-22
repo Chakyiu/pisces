@@ -13,7 +13,24 @@ export function Icon({ name }: { name: string }) {
     workloads: <path d="M3 12V4h4v8M9 12V7h4v5" />,
     pods: <circle cx="8" cy="8" r="4.5" />,
     services: <path d="M8 2.5v11M3 5.5h10M3 10.5h10" />,
-    endpoints: <><circle cx="8" cy="8" r="2" /><path d="M8 2.5v2M8 11.5v2M2.5 8h2M11.5 8h2" /></>,
+    home: <><path d="M2.5 7.5 8 3l5.5 4.5" /><path d="M4.5 7v6h7V7" /></>,
+    slash: <path d="M10.5 3 5.5 13" />,
+    docker: <><path d="M2.5 6 8 3.5 13.5 6 8 8.5 2.5 6Z" /><path d="M2.5 8.5 8 11l5.5-2.5" /><path d="M2.5 11 8 13.5 13.5 11" /></>,
+    kubernetes: <path d="M8 2.2 13.2 5.2v5.6L8 13.8 2.8 10.8V5.2L8 2.2Z" />,
+    clear: <path d="M4 4l8 8M12 4 4 12" />,
+    sidebar: <><rect x="2" y="3" width="12" height="10" rx="1" /><path d="M6 3v10" /></>,
+    refresh: <><path d="M13.2 8a5.2 5.2 0 1 1-1.4-3.6" /><path d="M11.8 2.2v2.6H9.2" /></>,
+    user: <><circle cx="8" cy="5.5" r="2" /><path d="M3.5 13.2c.8-2.2 2.4-3.3 4.5-3.3s3.7 1.1 4.5 3.3" /></>,
+    chevron: <path d="M4 6.5 8 10.5 12 6.5" />,
+    logs: <><path d="M4 2.5h5.2L12.5 6v7.5H4Z" /><path d="M9.2 2.5V6H12.5" /><path d="M6 8.5h4M6 11h3" /></>,
+    play: <path d="M5.5 3.5v9l7-4.5-7-4.5Z" />,
+    stop: <rect x="4" y="4" width="8" height="8" rx="1" />,
+    restart: <><path d="M13 8a5 5 0 1 1-1.6-3.6" /><path d="M11.6 2.2v2.8H8.8" /></>,
+    trash: <><path d="M3.5 5h9" /><path d="M6.2 5V3.5h3.6V5" /><path d="M5 5.5l.6 8h4.8l.6-8" /></>,
+    plus: <path d="M8 3.5v9M3.5 8h9" />,
+    eye: <><path d="M2 8s2.4-3.8 6-3.8S14 8 14 8s-2.4 3.8-6 3.8S2 8 2 8Z" /><circle cx="8" cy="8" r="1.6" /></>,
+    "eye-off": <><path d="M2 8s2.4-3.8 6-3.8S14 8 14 8s-2.4 3.8-6 3.8S2 8 2 8Z" /><circle cx="8" cy="8" r="1.6" /><path d="M3 13 13 3" /></>,
+    copy: <><rect x="6" y="6" width="7" height="7" rx="1" /><path d="M10 6V4.2A1.2 1.2 0 0 0 8.8 3H4.2A1.2 1.2 0 0 0 3 4.2v4.6A1.2 1.2 0 0 0 4.2 10H6" /></>,
   };
   return (
     <svg className="icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -22,8 +39,26 @@ export function Icon({ name }: { name: string }) {
   );
 }
 
+export function IconButton({
+  name,
+  label,
+  onClick,
+  disabled,
+}: {
+  name: string;
+  label: string;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button className="icon-btn" type="button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>
+      <Icon name={name} />
+    </button>
+  );
+}
+
 export function Badge({ state }: { state: string }) {
-  const tone = state === "running" ? "ok" : state === "paused" || state === "restarting" ? "warn" : state === "dead" ? "bad" : "muted";
+  const tone = state === "running" || state === "up" ? "ok" : state === "paused" || state === "restarting" ? "warn" : state === "dead" || state === "down" ? "bad" : "muted";
   return (
     <span className={`badge ${tone}`}>
       <i className={`sq ${tone}`} />

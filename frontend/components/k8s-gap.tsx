@@ -1,12 +1,19 @@
 "use client";
 
-import { useEffect } from "react";
 import { Loading } from "./bits";
-import { useConsole } from "./shell";
+import { PageFrame, useConsole, type Crumb } from "./shell";
 
-export function KubernetesGap({ title }: { title: string }) {
-  const { current, ready, setHeader } = useConsole();
-  useEffect(() => { setHeader({ title }); }, [setHeader, title]);
+export function KubernetesGap({ title, crumbs }: { title: string; crumbs?: Crumb[] }) {
+  const { refresh } = useConsole();
+  return (
+    <PageFrame title={title} crumbs={crumbs ?? [{ label: title }]} onRefresh={() => void refresh()}>
+      <KubernetesGapBody title={title} />
+    </PageFrame>
+  );
+}
+
+export function KubernetesGapBody({ title }: { title: string }) {
+  const { current, ready } = useConsole();
   if (!ready) return <Loading noun={title.toLowerCase()} />;
   if (!current) return <div className="state"><h2>Endpoint was not found.</h2></div>;
   if (current.kind !== "kubernetes") {

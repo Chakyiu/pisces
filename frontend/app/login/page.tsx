@@ -3,7 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, api } from "../../lib/api";
-import { Gate } from "../../components/bits";
+import { Gate, Icon } from "../../components/bits";
 import { useSession } from "../../components/session";
 
 export default function LoginPage() {
@@ -11,6 +11,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
   const [usernameError, setUsernameError] = useState("");
   const [passwordError, setPasswordError] = useState("");
   const [rejected, setRejected] = useState(false);
@@ -19,10 +20,10 @@ export default function LoginPage() {
 
   useEffect(() => {
     setEnded(new URLSearchParams(window.location.search).get("ended") === "1" || (session.status === "out" && session.ended));
-    if (session.status === "in") router.replace("/endpoints");
+    if (session.status === "in") router.replace("/home");
   }, [session, router]);
 
-  if (session.status === "checking") return <Gate title="Checking session" />;
+  if (session.status === "checking" || session.status === "in") return <Gate title="Checking session" />;
   if (session.status === "error") {
     return <Gate title="The API did not answer within 10 seconds." onRetry={() => void session.refresh()} />;
   }
@@ -43,7 +44,7 @@ export default function LoginPage() {
         allow401: true,
       });
       session.signedIn(body.username);
-      router.replace("/endpoints");
+      router.replace("/home");
     } catch (err) {
       if (err instanceof ApiError && err.code === "unauthorized") {
         setRejected(true);
@@ -54,14 +55,13 @@ export default function LoginPage() {
     }
   }
 
+  const passwordLabel = showPassword ? "Hide password" : "Show password";
   return (
     <div className="login">
-      <section className="login-brand">
-        <div className="kind">Pisces</div>
+      <div className="login-card">
+        <div className="wordmark">Pisces</div>
         <h1>Sign in</h1>
-        <p>The console for the Docker engine on this machine, and for a Kubernetes context when one is available.</p>
-      </section>
-      <section className="login-form">
+        <p className="note">The console for the Docker engine on this machine, and for a Kubernetes context when one is available.</p>
         <form onSubmit={(event) => void submit(event)}>
           {rejected ? (
             <div className="alert bad" role="alert">
@@ -79,6 +79,7 @@ export default function LoginPage() {
             <input
               className="field"
               value={username}
+              placeholder="Enter your username"
               autoComplete="username"
               disabled={pending}
               onBlur={() => setUsernameError(username.trim() ? "" : "Enter a username.")}
@@ -88,15 +89,27 @@ export default function LoginPage() {
           </label>
           <label className="label">
             Password
-            <input
-              className="field"
-              type="password"
-              value={password}
-              autoComplete="current-password"
-              disabled={pending}
-              onBlur={() => setPasswordError(password ? "" : "Enter a password.")}
-              onChange={(event) => setPassword(event.target.value)}
-            />
+            <span className="field-wrap">
+              <input
+                className="field"
+                type={showPassword ? "text" : "password"}
+                value={password}
+                placeholder="Enter your password"
+                autoComplete="current-password"
+                disabled={pending}
+                onBlur={() => setPasswordError(password ? "" : "Enter a password.")}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              <button
+                className="icon-btn field-btn"
+                type="button"
+                aria-label={passwordLabel}
+                title={passwordLabel}
+                onClick={() => setShowPassword((value) => !value)}
+              >
+                <Icon name={showPassword ? "eye-off" : "eye"} />
+              </button>
+            </span>
             {passwordError ? <span className="field-error">{passwordError}</span> : null}
           </label>
           <button className="btn primary block" type="submit" disabled={pending}>
@@ -104,7 +117,7 @@ export default function LoginPage() {
           </button>
           <p className="note">This console has no sign-up. Use the account configured for the API.</p>
         </form>
-      </section>
+      </div>
     </div>
   );
 }
