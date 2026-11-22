@@ -85,18 +85,20 @@ export function ErrorState({
   attempts,
   at,
   onRetry,
+  retryLabel,
 }: {
   title: string;
   message: string;
   attempts: number;
   at?: Date;
   onRetry?: () => void;
+  retryLabel?: string;
 }) {
   return (
     <div className="state" role="alert">
       <h2>{title}</h2>
       <p>{message}</p>
-      {onRetry ? <button className="btn" onClick={onRetry}>Retry</button> : null}
+      {onRetry ? <button className="btn" onClick={onRetry}>{retryLabel ?? "Retry"}</button> : null}
       {attempts > 0 && at ? (
         <p className="note">Last attempted: {clock(at)} · {attempts} {attempts === 1 ? "retry" : "retries"}</p>
       ) : null}

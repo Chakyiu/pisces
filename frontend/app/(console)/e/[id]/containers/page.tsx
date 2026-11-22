@@ -8,7 +8,7 @@ import { age, portList } from "../../../../../lib/format";
 import type { Container } from "../../../../../lib/types";
 import { Badge, Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
-import { PageFrame } from "../../../../../components/shell";
+import { PageFrame, useConsole } from "../../../../../components/shell";
 
 const STATES = ["all", "created", "running", "paused", "restarting", "exited", "dead"];
 
@@ -20,15 +20,23 @@ function running(item: Container) {
 }
 
 export default function ContainersPage() {
-  const refreshRef = useRef<() => void>(() => {});
+  const { current, ready } = useConsole();
+  const refreshRef = useRef<(() => void) | null>(null);
+  // Only hand PageFrame a handler once DockerView renders Body; until then the
+  // header Refresh would call nothing.
+  const mounted = ready && current?.kind === "docker";
   return (
-    <PageFrame title="Container list" crumbs={[{ label: "Containers" }]} onRefresh={() => refreshRef.current()}>
+    <PageFrame
+      title="Container list"
+      crumbs={[{ label: "Containers" }]}
+      onRefresh={mounted ? () => refreshRef.current?.() : undefined}
+    >
       <DockerView noun="containers">{(endpoint) => <Body refreshRef={refreshRef} id={endpoint.id} name={endpoint.name} />}</DockerView>
     </PageFrame>
   );
 }
 
-function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: { current: () => void } }) {
+function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: { current: (() => void) | null } }) {
   const router = useRouter();
   const [q, setQ] = useState("");
   const [state, setState] = useState("all");
