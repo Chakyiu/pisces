@@ -6,6 +6,7 @@ import { clock } from "../lib/format";
 export function Icon({ name }: { name: string }) {
   const paths: Record<string, ReactNode> = {
     overview: <><rect x="3" y="3" width="4.5" height="4.5" /><rect x="8.5" y="3" width="4.5" height="4.5" /><rect x="3" y="8.5" width="4.5" height="4.5" /><rect x="8.5" y="8.5" width="4.5" height="4.5" /></>,
+    stacks: <><rect x="2.5" y="2.5" width="11" height="3" rx="0.5" /><rect x="2.5" y="6.5" width="11" height="3" rx="0.5" /><rect x="2.5" y="10.5" width="11" height="3" rx="0.5" /></>,
     containers: <><path d="M2.5 6 8 3.5 13.5 6 8 8.5 2.5 6Z" /><path d="M2.5 8.5 8 11l5.5-2.5" /><path d="M2.5 11 8 13.5 13.5 11" /></>,
     images: <><rect x="3" y="3" width="10" height="10" rx="1" /><path d="M3 10.5 6 8l2 1.5 2-2 3 3" /></>,
     volumes: <path d="M3 5.5 8 3l5 2.5v5L8 13l-5-2.5v-5Z" />,
@@ -59,7 +60,8 @@ export function IconButton({
 }
 
 export function Badge({ state }: { state: string }) {
-  const tone = state === "running" || state === "up" ? "ok" : state === "paused" || state === "restarting" ? "warn" : state === "dead" || state === "down" ? "bad" : "muted";
+  const key = state.toLowerCase();
+  const tone = key === "running" || key === "up" ? "ok" : key === "paused" || key === "restarting" || key === "partial" ? "warn" : key === "dead" || key === "down" ? "bad" : "muted";
   return (
     <span className={`badge ${tone}`}>
       <i className={`sq ${tone}`} />

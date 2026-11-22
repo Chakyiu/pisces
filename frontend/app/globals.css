@@ -397,7 +397,8 @@ th {
 td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
 .name-cell { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name-link { text-decoration: underline; text-underline-offset: 3px; }
-.col-check { width: 44px; text-align: center; padding: 2px 4px; }
+.col-check { width: 52px; text-align: center; padding: 2px 4px; }
+.stack-containers { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; padding: 6px 12px; }
 .check {
   width: 36px;
   height: 36px;
