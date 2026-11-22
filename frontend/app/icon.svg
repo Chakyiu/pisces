@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Pisces">
+  <title>Pisces</title>
+  <rect width="64" height="64" rx="13" fill="#0B1120"/>
+  <path fill="#FFB800" stroke="#FFB800" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" d="M58 32c0-9.2-10-17.5-23-17.5-6.3 0-11.6 2.4-15.3 6.4L7.5 14.2l9.8 17.8L7.5 49.8l12.2-6.7C23.4 47.1 28.7 49.5 35 49.5 48 49.5 58 41.2 58 32Z"/>
+  <circle cx="47.5" cy="28.1" r="3" fill="#0B1120"/>
+</svg>

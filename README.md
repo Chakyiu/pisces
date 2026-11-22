@@ -1,12 +1,37 @@
+<p align="center">
+  <img src="frontend/app/icon.svg" width="96" height="96" alt="Pisces icon">
+</p>
+
 # Pisces
 
-A Portainer-like web app for managing Docker and Kubernetes: a **Next.js** frontend and a
-**Rust** backend that provides authenticated API control over the Docker daemon and the
-Kubernetes API.
+A Portainer-like web app for managing Docker from a browser: a **Next.js** frontend and a
+**Rust** backend that provides authenticated API control over the Docker daemon.
 
 The Docker slice (TELE-73) is the working console: sign in, add this machine's engine, and
 start, stop, inspect, and remove containers, plus images, volumes, and networks.
-Kubernetes views are present in the shell and wait on TELE-74.
+Kubernetes is not delivered yet — the Kubernetes nav routes render a "not in this build"
+placeholder, and the only Kubernetes thing that works is saving a context.
+
+## Screens
+
+Screens from the UI/UX pass. Every screen below exists in the current Docker build;
+nothing Kubernetes is shown because nothing Kubernetes is implemented.
+
+![Sign in](docs/images/screenshots/01-login.png)
+*Sign in — one operator account, configured on the container, no sign-up.*
+
+![No endpoint yet](docs/images/screenshots/02-no-endpoint.png)
+*No endpoint yet — add this machine's Docker engine before the console opens.*
+
+![Containers](docs/images/screenshots/03-containers.png)
+*Containers — state, ports, and start/stop/restart/remove per container.*
+
+![Container detail](docs/images/screenshots/04-container-detail.png)
+*Container detail — inspect fields and the live log tail.*
+
+The mark in the README is the app icon: `frontend/app/icon.svg` is the source, and the same
+art is wired as the favicon, the Apple touch icon, and the 192/512 icons in the web app
+manifest.
 
 ## Deploy
 
