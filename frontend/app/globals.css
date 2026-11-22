@@ -228,6 +228,20 @@ textarea.field {
 }
 .env-icon { display: inline-flex; }
 .env-current .icon-btn .icon { width: 24px; height: 24px; }
+/* Collapsed rail: the glyph is the resting state; the clear button replaces it on hover/focus. */
+.sidebar.collapsed .env-current { position: relative; }
+.sidebar.collapsed .env-current .icon-btn {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.sidebar.collapsed .env-current:hover .icon-btn,
+.sidebar.collapsed .env-current:focus-within .icon-btn { opacity: 1; pointer-events: auto; }
+.sidebar.collapsed .env-current:hover .env-icon,
+.sidebar.collapsed .env-current:focus-within .env-icon { opacity: 0; }
 .sidebar-footer {
   margin-top: auto;
   padding: 12px;
