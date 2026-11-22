@@ -3,7 +3,7 @@
 //! On Windows the daemon is the named pipe `//./pipe/docker_engine`.
 //! Every Docker endpoint uses that local engine. Socket paths are not accepted.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
@@ -28,6 +28,11 @@ pub const ENGINE_DOWN: &str =
     "The engine did not answer within 10 seconds. Nothing on this page was changed.";
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+
+const COMPOSE_PROJECT: &str = "com.docker.compose.project";
+const COMPOSE_SERVICE: &str = "com.docker.compose.service";
+const COMPOSE_ONEOFF: &str = "com.docker.compose.oneoff";
+const COMPOSE_DEPENDS_ON: &str = "com.docker.compose.depends_on";
 
 /// Build a Docker client for the local daemon. Construction is lazy: no request is
 /// made until an API call runs, so this is safe when Docker is not running.
@@ -133,7 +138,26 @@ pub struct ContainerOut {
     pub created: i64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackContainerOut {
+    pub id: String,
+    pub name: String,
+    pub service: Option<String>,
+    pub state: String,
+}
+
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackOut {
+    pub project: String,
+    pub running: usize,
+    pub total: usize,
+    pub state: &'static str,
+    pub containers: Vec<StackContainerOut>,
+}
+
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MountOut {
     pub source: String,
@@ -300,6 +324,25 @@ pub async fn overview() -> Result<Overview, ApiError> {
         Ok(result) => result,
         Err(_) => Err(ApiError::daemon(ENGINE_DOWN)),
     }
+}
+
+/// One Compose project on the engine, keyed by `com.docker.compose.project`.
+/// Membership is live labels only: nothing is stored in `endpoints.json`.
+pub async fn list_stacks(q: &str) -> Result<Vec<StackOut>, ApiError> {
+    let docker = docker()?;
+    let mut filters = HashMap::new();
+    filters.insert("label".to_string(), vec![COMPOSE_PROJECT.to_string()]);
+    let listed = timed(docker.list_containers(Some(ListContainersOptions {
+        all: true,
+        filters: Some(filters),
+        ..Default::default()
+    })))
+    .await?;
+    let rows = listed.iter().filter_map(compose_row).collect();
+    let mut stacks = group_stacks(rows);
+    let q = q.trim().to_ascii_lowercase();
+    stacks.retain(|stack| q.is_empty() || stack.project.to_ascii_lowercase().contains(&q));
+    Ok(stacks)
 }
 
 pub async fn list_containers(q: &str, state: &str) -> Result<Vec<ContainerOut>, ApiError> {
@@ -671,19 +714,185 @@ pub async fn remove_network(name: &str) -> Result<(), ApiError> {
     timed(docker.remove_network(name)).await
 }
 
-fn container_out(summary: &ContainerSummary) -> ContainerOut {
-    let name = summary
+fn container_name(summary: &ContainerSummary) -> String {
+    summary
         .names
         .as_ref()
         .and_then(|names| names.first())
         .map(|name| name.trim_start_matches('/').to_string())
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| short_id(summary.id.as_deref().unwrap_or("")));
-    let state = summary
+        .unwrap_or_else(|| short_id(summary.id.as_deref().unwrap_or("")))
+}
+
+fn container_state(summary: &ContainerSummary) -> String {
+    summary
         .state
         .map(|state| state.to_string())
         .filter(|state| !state.is_empty())
-        .unwrap_or_else(|| "created".into());
+        .unwrap_or_else(|| "created".into())
+}
+
+/// A Compose-labelled container, before grouping. Kept separate from the bollard
+/// model so the grouping rules are testable without a Docker daemon.
+#[derive(Clone, Debug)]
+struct ComposeRow {
+    id: String,
+    name: String,
+    state: String,
+    project: String,
+    service: Option<String>,
+    one_off: bool,
+    depends_on: Vec<String>,
+}
+
+fn compose_row(summary: &ContainerSummary) -> Option<ComposeRow> {
+    let labels = summary.labels.as_ref()?;
+    let project = labels.get(COMPOSE_PROJECT)?.trim();
+    if project.is_empty() {
+        return None;
+    }
+    let one_off = labels
+        .get(COMPOSE_ONEOFF)
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let service = labels
+        .get(COMPOSE_SERVICE)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    // `depends_on` is comma-separated `service:condition:required`; older projects omit it.
+    let depends_on = labels
+        .get(COMPOSE_DEPENDS_ON)
+        .map(|value| {
+            value
+                .split(',')
+                .filter_map(|part| {
+                    let name = part.split(':').next().unwrap_or("").trim();
+                    (!name.is_empty()).then(|| name.to_string())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ComposeRow {
+        id: summary.id.clone().unwrap_or_default(),
+        name: container_name(summary),
+        state: container_state(summary),
+        project: project.to_string(),
+        service,
+        one_off,
+        depends_on,
+    })
+}
+
+/// Group Compose-labelled containers by project. One-off containers (`compose run`)
+/// never inflate a count, appear as a link, or get acted on.
+fn group_stacks(rows: Vec<ComposeRow>) -> Vec<StackOut> {
+    let mut by_project: BTreeMap<String, Vec<ComposeRow>> = BTreeMap::new();
+    for row in rows {
+        if row.one_off {
+            continue;
+        }
+        by_project.entry(row.project.clone()).or_default().push(row);
+    }
+    by_project
+        .into_iter()
+        .map(|(project, rows)| {
+            let total = rows.len();
+            let running = rows.iter().filter(|row| row.state == "running").count();
+            let state = if running == total {
+                "Running"
+            } else if running == 0 {
+                "Stopped"
+            } else {
+                "Partial"
+            };
+            StackOut {
+                project,
+                running,
+                total,
+                state,
+                containers: ordered_for_start(rows),
+            }
+        })
+        .collect()
+}
+
+/// Start order: dependencies first where `depends_on` names them, otherwise the
+/// display order. Older projects omit `depends_on`, and cycles are left in display
+/// order too, so this is best effort rather than a deterministic guarantee.
+fn ordered_for_start(rows: Vec<ComposeRow>) -> Vec<StackContainerOut> {
+    let mut base = rows;
+    base.sort_by(|a, b| match (&a.service, &b.service) {
+        (Some(left), Some(right)) => left.cmp(right).then_with(|| a.name.cmp(&b.name)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.name.cmp(&b.name),
+    });
+
+    let mut services: Vec<String> = Vec::new();
+    for row in &base {
+        if let Some(service) = &row.service {
+            if !services.contains(service) {
+                services.push(service.clone());
+            }
+        }
+    }
+
+    let mut deps: HashMap<String, HashSet<String>> = HashMap::new();
+    for row in &base {
+        let Some(service) = &row.service else {
+            continue;
+        };
+        for dep in &row.depends_on {
+            if dep != service && services.contains(dep) {
+                deps.entry(service.clone()).or_default().insert(dep.clone());
+            }
+        }
+    }
+
+    let mut remaining = services.clone();
+    let mut done: HashSet<String> = HashSet::new();
+    let mut ordered = Vec::new();
+    while !remaining.is_empty() {
+        let ready = remaining.iter().position(|service| {
+            deps.get(service)
+                .map(|needs| needs.iter().all(|dep| done.contains(dep)))
+                .unwrap_or(true)
+        });
+        let Some(index) = ready else { break };
+        let service = remaining.remove(index);
+        done.insert(service.clone());
+        ordered.push(service);
+    }
+    // A dependency cycle keeps the remaining services in display order.
+    ordered.extend(remaining);
+
+    let mut out = Vec::new();
+    for service in ordered {
+        for row in base
+            .iter()
+            .filter(|row| row.service.as_deref() == Some(service.as_str()))
+        {
+            out.push(stack_container_out(row));
+        }
+    }
+    for row in base.iter().filter(|row| row.service.is_none()) {
+        out.push(stack_container_out(row));
+    }
+    out
+}
+
+fn stack_container_out(row: &ComposeRow) -> StackContainerOut {
+    StackContainerOut {
+        id: row.id.clone(),
+        name: row.name.clone(),
+        service: row.service.clone(),
+        state: row.state.clone(),
+    }
+}
+
+fn container_out(summary: &ContainerSummary) -> ContainerOut {
+    let name = container_name(summary);
+    let state = container_state(summary);
     ContainerOut {
         id: summary.id.clone().unwrap_or_default(),
         name,
@@ -949,8 +1158,171 @@ fn split_timestamp(line: &str) -> (String, String) {
 }
 
 #[cfg(test)]
-mod console_tests {
+mod tests {
     use super::*;
+
+    fn row(
+        project: &str,
+        service: Option<&str>,
+        name: &str,
+        state: &str,
+        one_off: bool,
+        depends_on: &[&str],
+    ) -> ComposeRow {
+        ComposeRow {
+            id: format!("id-{name}"),
+            name: name.to_string(),
+            state: state.to_string(),
+            project: project.to_string(),
+            service: service.map(str::to_string),
+            one_off,
+            depends_on: depends_on.iter().map(|dep| dep.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn groups_by_project_and_counts_running() {
+        let stacks = group_stacks(vec![
+            row("web", Some("api"), "web-api-1", "running", false, &[]),
+            row("web", Some("db"), "web-db-1", "exited", false, &[]),
+            row(
+                "cache",
+                Some("redis"),
+                "cache-redis-1",
+                "running",
+                false,
+                &[],
+            ),
+            row(
+                "idle",
+                Some("worker"),
+                "idle-worker-1",
+                "exited",
+                false,
+                &[],
+            ),
+        ]);
+
+        assert_eq!(
+            stacks
+                .iter()
+                .map(|stack| (
+                    stack.project.as_str(),
+                    stack.running,
+                    stack.total,
+                    stack.state
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("cache", 1, 1, "Running"),
+                ("idle", 0, 1, "Stopped"),
+                ("web", 1, 2, "Partial"),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_off_containers_are_not_counted_or_listed() {
+        let stacks = group_stacks(vec![
+            row("web", Some("api"), "web-api-1", "running", false, &[]),
+            row("web", Some("api"), "web-api-run-1", "exited", true, &[]),
+        ]);
+
+        assert_eq!(stacks.len(), 1);
+        assert_eq!(stacks[0].total, 1);
+        assert_eq!(stacks[0].running, 1);
+        assert_eq!(stacks[0].containers.len(), 1);
+        assert_eq!(stacks[0].containers[0].name, "web-api-1");
+    }
+
+    #[test]
+    fn containers_without_a_project_are_not_a_stack() {
+        let summary = ContainerSummary {
+            id: Some("abc".into()),
+            labels: Some(HashMap::from([(
+                COMPOSE_SERVICE.to_string(),
+                "api".to_string(),
+            )])),
+            ..Default::default()
+        };
+        assert!(compose_row(&summary).is_none());
+    }
+
+    #[test]
+    fn display_order_is_service_then_name_with_missing_services_last() {
+        let stacks = group_stacks(vec![
+            row("web", None, "web-solo-1", "running", false, &[]),
+            row("web", Some("z"), "web-z-1", "running", false, &[]),
+            row("web", Some("a"), "web-a-2", "running", false, &[]),
+            row("web", Some("a"), "web-a-1", "running", false, &[]),
+        ]);
+        let names: Vec<&str> = stacks[0]
+            .containers
+            .iter()
+            .map(|container| container.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["web-a-1", "web-a-2", "web-z-1", "web-solo-1"]);
+    }
+
+    #[test]
+    fn start_order_follows_depends_on() {
+        let stacks = group_stacks(vec![
+            row("web", Some("api"), "web-api-1", "exited", false, &["db"]),
+            row("web", Some("db"), "web-db-1", "exited", false, &[]),
+            row(
+                "web",
+                Some("worker"),
+                "web-worker-1",
+                "exited",
+                false,
+                &["db", "api"],
+            ),
+        ]);
+        let names: Vec<&str> = stacks[0]
+            .containers
+            .iter()
+            .map(|container| container.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["web-db-1", "web-api-1", "web-worker-1"]);
+    }
+
+    #[test]
+    fn dependency_cycles_keep_display_order() {
+        let stacks = group_stacks(vec![
+            row("web", Some("a"), "web-a-1", "exited", false, &["b"]),
+            row("web", Some("b"), "web-b-1", "exited", false, &["a"]),
+        ]);
+        let names: Vec<&str> = stacks[0]
+            .containers
+            .iter()
+            .map(|container| container.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["web-a-1", "web-b-1"]);
+    }
+
+    #[test]
+    fn depends_on_label_is_parsed_per_service() {
+        let summary = ContainerSummary {
+            id: Some("abc".into()),
+            state: Some(bollard::models::ContainerSummaryStateEnum::RUNNING),
+            labels: Some(HashMap::from([
+                (COMPOSE_PROJECT.to_string(), "web".to_string()),
+                (COMPOSE_SERVICE.to_string(), "api".to_string()),
+                (
+                    COMPOSE_DEPENDS_ON.to_string(),
+                    "db:service_started:false,cache:service_healthy:required".to_string(),
+                ),
+            ])),
+            ..Default::default()
+        };
+        let parsed = compose_row(&summary).expect("compose row");
+        assert_eq!(
+            parsed.depends_on,
+            vec!["db".to_string(), "cache".to_string()]
+        );
+        assert!(!parsed.one_off);
+        assert_eq!(parsed.state, "running");
+    }
 
     #[test]
     fn console_shells_are_allowlisted() {

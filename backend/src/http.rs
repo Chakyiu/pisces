@@ -132,6 +132,7 @@ pub fn router(state: AppState) -> Router {
             "/api/endpoints/{id}/containers",
             get(list_containers).post(create_container),
         )
+        .route("/api/endpoints/{id}/stacks", get(list_stacks))
         .route(
             "/api/endpoints/{id}/containers/{container_id}",
             get(container_detail).delete(delete_container),
@@ -372,6 +373,16 @@ async fn list_containers(
         query.state.as_deref().unwrap_or(""),
     )
     .await?;
+    Ok(Json(page_of(items, &query)?))
+}
+
+async fn list_stacks(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<ListPage<docker::StackOut>>, ApiError> {
+    require_docker(&state, &id)?;
+    let items = docker::list_stacks(query.q.as_deref().unwrap_or("")).await?;
     Ok(Json(page_of(items, &query)?))
 }
 

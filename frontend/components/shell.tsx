@@ -31,6 +31,7 @@ export function useConsole(): ConsoleValue {
 
 const DOCKER_NAV = [
   { icon: "overview", label: "Dashboard", suffix: "" },
+  { icon: "stacks", label: "Stacks", suffix: "/stacks" },
   { icon: "containers", label: "Containers", suffix: "/containers" },
   { icon: "images", label: "Images", suffix: "/images" },
   { icon: "networks", label: "Networks", suffix: "/networks" },
