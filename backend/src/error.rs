@@ -98,6 +98,7 @@ impl ApiError {
             code: "deploy_failed",
             message: message.into(),
             retryable: false,
+            message_is_safe: false,
         }
     }
 }
