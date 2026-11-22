@@ -10,9 +10,9 @@ use bollard::auth::DockerCredentials;
 use bollard::container::LogOutput;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, EndpointSettings, HostConfig,
-    ImageSummary, Network, NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy,
-    RestartPolicyNameEnum, VolumeCreateRequest,
+    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, ContainerUpdateBody,
+    EndpointSettings, HostConfig, ImageSummary, Network, NetworkCreateRequest, NetworkingConfig,
+    PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, InspectContainerOptions, ListContainersOptions,
@@ -1223,6 +1223,76 @@ pub async fn container_config(id: &str) -> Result<ContainerConfigOut, ApiError> 
         networks,
         mounts,
     })
+}
+
+pub async fn update_container_settings(
+    id: &str,
+    requested_name: Option<&str>,
+    requested_policy: Option<&str>,
+    requested_retries: Option<i64>,
+) -> Result<(), ApiError> {
+    let docker = docker()?;
+    let inspected = inspect_raw(&docker, id).await?;
+    let full_id = inspected
+        .id
+        .clone()
+        .ok_or_else(|| ApiError::not_found(format!("{id} was not found.")))?;
+    let current_name = inspected_name(&inspected);
+    let next_name = requested_name.map(checked_container_name).transpose()?;
+    let rename_needed = next_name
+        .as_deref()
+        .is_some_and(|name| name != current_name && !name.eq_ignore_ascii_case(&current_name));
+    let old_policy = inspected
+        .host_config
+        .as_ref()
+        .and_then(|host| host.restart_policy.as_ref());
+    let policy = requested_policy
+        .map(|name| {
+            let mut policy = restart_policy(name.trim(), old_policy)?;
+            if name.trim() == "on-failure" {
+                let retries = requested_retries
+                    .or_else(|| old_policy.and_then(|old| old.maximum_retry_count))
+                    .unwrap_or(0);
+                if retries < 0 {
+                    return Err(ApiError::validation("Retry count cannot be negative."));
+                }
+                policy.maximum_retry_count = Some(retries);
+            }
+            Ok(policy)
+        })
+        .transpose()?;
+
+    if let (true, Some(name)) = (rename_needed, next_name.as_deref()) {
+        let rename = RenameContainerOptionsBuilder::new().name(name).build();
+        timed(docker.rename_container(&full_id, rename)).await?;
+    }
+    if let Some(restart_policy) = policy {
+        if let Err(error) = timed(docker.update_container(
+            &full_id,
+            ContainerUpdateBody {
+                restart_policy: Some(restart_policy),
+                ..Default::default()
+            },
+        ))
+        .await
+        {
+            if rename_needed {
+                let rename = RenameContainerOptionsBuilder::new()
+                    .name(&current_name)
+                    .build();
+                if timed(docker.rename_container(&full_id, rename))
+                    .await
+                    .is_err()
+                {
+                    return Err(ApiError::daemon(
+                        "Restart policy update failed and the original name could not be restored.",
+                    ));
+                }
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 pub async fn list_images() -> Result<Vec<ImageOut>, ApiError> {

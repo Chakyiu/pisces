@@ -8,6 +8,7 @@ import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerConsole } from "../../../../../../components/container-console";
 import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
+import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
 
@@ -59,6 +60,7 @@ function Body({
   const [confirm, setConfirm] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
 
   async function load(retry: boolean) {
@@ -179,6 +181,9 @@ function Body({
             <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
               <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
             </button>
+            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
+              Edit name / restart
+            </button>
             <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
               <Icon name="copy" /> Duplicate/Edit
             </button>
@@ -249,6 +254,20 @@ function Body({
             </button>
           </div>
         </Dialog>
+      ) : null}
+      {settingsOpen ? (
+        <ContainerSettingsDialog
+          endpointId={endpointId}
+          containerId={containerId}
+          name={detail.name}
+          restartPolicy={detail.restartPolicy}
+          retryCount={detail.restartMaximumRetryCount}
+          onClose={() => setSettingsOpen(false)}
+          onSaved={() => {
+            setSettingsOpen(false);
+            void load(false);
+          }}
+        />
       ) : null}
       {editOpen ? (
         <ContainerDuplicateDialog

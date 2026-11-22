@@ -108,6 +108,13 @@ struct VolumeBody {
 }
 
 #[derive(Deserialize)]
+struct ContainerSettingsBody {
+    name: String,
+    restart_policy: String,
+    restart_maximum_retry_count: Option<i64>,
+}
+
+#[derive(Deserialize)]
 struct DuplicateBody {
     name: String,
     image: Option<String>,
@@ -174,6 +181,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/endpoints/{id}/containers/{container_id}/config",
             get(container_config),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/settings",
+            axum::routing::put(update_container_settings),
         )
         .route(
             "/api/endpoints/{id}/containers/{container_id}/duplicate",
@@ -705,6 +716,24 @@ async fn container_config(
     require_docker(&state, &id)?;
     let container_id = docker::object_ref(&container_id)?;
     Ok(Json(docker::container_config(container_id).await?))
+}
+
+async fn update_container_settings(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+    body: Result<Json<ContainerSettingsBody>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    let body = take_json(body)?;
+    require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?;
+    docker::update_container_settings(
+        container_id,
+        Some(&body.name),
+        Some(&body.restart_policy),
+        body.restart_maximum_retry_count,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn duplicate_container(
