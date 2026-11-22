@@ -107,6 +107,7 @@ function Body({
         message="The engine answered. This container is gone."
         attempts={0}
         onRetry={() => router.push(`/e/${endpointId}/containers`)}
+        retryLabel="Back to containers"
       />
     );
   }

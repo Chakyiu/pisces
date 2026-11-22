@@ -7,7 +7,7 @@ import { age, bytes, imageLabel, shortId } from "../../../../../lib/format";
 import type { ImageItem } from "../../../../../lib/types";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
 import { DockerView, publishApiError, usePaged } from "../../../../../components/gate";
-import { PageFrame } from "../../../../../components/shell";
+import { PageFrame, useConsole } from "../../../../../components/shell";
 
 function parsePort(raw: string): { host: number; container: number; protocol: string } | "empty" | null {
   const value = raw.trim();
@@ -27,15 +27,23 @@ function parsePort(raw: string): { host: number; container: number; protocol: st
 }
 
 export default function ImagesPage() {
-  const refreshRef = useRef<{ current: () => void }>({ current: () => {} });
+  const { current, ready } = useConsole();
+  const refreshRef = useRef<(() => void) | null>(null);
+  // Only hand PageFrame a handler once DockerView renders Body; until then the
+  // header Refresh would call nothing.
+  const mounted = ready && current?.kind === "docker";
   return (
-    <PageFrame title="Images" crumbs={[{ label: "Images" }]} onRefresh={() => refreshRef.current.current()}>
-      <DockerView noun="images">{(endpoint) => <Body refreshRef={refreshRef.current} id={endpoint.id} name={endpoint.name} />}</DockerView>
+    <PageFrame
+      title="Images"
+      crumbs={[{ label: "Images" }]}
+      onRefresh={mounted ? () => refreshRef.current?.() : undefined}
+    >
+      <DockerView noun="images">{(endpoint) => <Body refreshRef={refreshRef} id={endpoint.id} name={endpoint.name} />}</DockerView>
     </PageFrame>
   );
 }
 
-function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: { current: () => void } }) {
+function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: { current: (() => void) | null } }) {
   const router = useRouter();
   const query = usePaged<ImageItem>(`/api/endpoints/${id}/images?limit=50`);
   refreshRef.current = () => { void query.reload(); };
