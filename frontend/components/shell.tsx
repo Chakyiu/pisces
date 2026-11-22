@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api } from "../lib/api";
@@ -39,6 +39,7 @@ const DOCKER_NAV = [
 ] as const;
 
 const SIDEBAR_KEY = "pisces.sidebar.open";
+const USER_MENU_ID = "user-menu";
 
 export function Shell({ children }: { children: ReactNode }) {
   const session = useSession();
@@ -51,6 +52,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(true);
   const [overlay, setOverlay] = useState(false);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   const id = pathname.match(/^\/e\/([^/]+)/)?.[1];
   const current = endpoints.find((endpoint) => endpoint.id === id);
@@ -95,6 +98,10 @@ export function Shell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  useEffect(() => {
+    if (menu) menuRef.current?.querySelector<HTMLElement>("[role=\"menuitem\"]")?.focus();
+  }, [menu]);
+
   useEffect(() => { setMenu(false); }, [pathname]);
   useEffect(() => {
     if (window.innerWidth < 561) setOpen(false);
@@ -110,6 +117,42 @@ export function Shell({ children }: { children: ReactNode }) {
     await api("/api/session", { method: "DELETE" }).catch(() => undefined);
     session.signOut();
     router.replace("/login");
+  }
+
+  function closeMenu() {
+    setMenu(false);
+    menuButtonRef.current?.focus();
+  }
+
+  function onMenuKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[role=\"menuitem\"]"));
+    if (!items.length) return;
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        items[index === -1 ? 0 : (index + 1) % items.length].focus();
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        items[index === -1 ? items.length - 1 : (index - 1 + items.length) % items.length].focus();
+        break;
+      case "Home":
+        event.preventDefault();
+        items[0].focus();
+        break;
+      case "End":
+        event.preventDefault();
+        items[items.length - 1].focus();
+        break;
+      case "Escape":
+        event.preventDefault();
+        closeMenu();
+        break;
+      case "Tab":
+        setMenu(false);
+        break;
+    }
   }
 
   function toggleSidebar() {
@@ -173,15 +216,31 @@ export function Shell({ children }: { children: ReactNode }) {
             </nav>
             <div className="header-spacer" />
             <div className="popover">
-              <button className="btn user-btn" type="button" aria-label="User menu" title="User menu" aria-expanded={menu} onClick={() => setMenu((value) => !value)}>
+              <button
+                ref={menuButtonRef}
+                className="btn user-btn"
+                type="button"
+                aria-label="User menu"
+                title="User menu"
+                aria-haspopup="menu"
+                aria-expanded={menu}
+                aria-controls={menu ? USER_MENU_ID : undefined}
+                onClick={() => setMenu((value) => !value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape" && menu) {
+                    event.preventDefault();
+                    closeMenu();
+                  }
+                }}
+              >
                 <Icon name="user" />
                 <span>{session.username}</span>
                 <Icon name="chevron" />
               </button>
               {menu ? (
-                <div className="menu" role="menu">
-                  <div className="menu-user">{session.username}</div>
-                  <button type="button" onClick={() => void signOut()}><Icon name="sign-out" />Sign out</button>
+                <div id={USER_MENU_ID} ref={menuRef} className="menu" role="menu" onKeyDown={onMenuKeyDown}>
+                  <div className="menu-user" aria-hidden="true">{session.username}</div>
+                  <button type="button" role="menuitem" tabIndex={-1} onClick={() => void signOut()}><Icon name="sign-out" />Sign out</button>
                 </div>
               ) : null}
             </div>
