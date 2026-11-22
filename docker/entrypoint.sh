@@ -4,20 +4,8 @@ set -euo pipefail
 
 mkdir -p /data
 
-if [[ -z "${PISCES_USERNAME:-}" ]]; then
-  echo "pisces: set PISCES_USERNAME" >&2
-  exit 1
-fi
-
-if [[ -z "${PISCES_PASSWORD_HASH:-}" ]]; then
-  if [[ -z "${PISCES_PASSWORD:-}" ]]; then
-    echo "pisces: set PISCES_PASSWORD or PISCES_PASSWORD_HASH" >&2
-    exit 1
-  fi
-  PISCES_PASSWORD_HASH="$(printf '%s' "$PISCES_PASSWORD" | /usr/local/bin/pisces hash-password | tr -d '\r\n')"
-  export PISCES_PASSWORD_HASH
-fi
-unset PISCES_PASSWORD || true
+# Username and password validation lives in the backend so there is one contract
+# for the image and for `cargo run`; it hashes PISCES_PASSWORD itself at startup.
 
 if [[ -z "${PISCES_JWT_SECRET:-}" ]]; then
   secret_file=/data/jwt_secret

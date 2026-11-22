@@ -26,24 +26,52 @@ struct Claims {
     exp: u64,
 }
 
+/// Reads the operator credentials. `PISCES_PASSWORD_HASH` wins when set; otherwise
+/// `PISCES_PASSWORD` is hashed once here and only the hash is kept in memory. The
+/// plaintext value is never printed.
 pub fn load_from_env() -> Result<AuthConfig, &'static str> {
     let username = std::env::var("PISCES_USERNAME").unwrap_or_default();
-    let password_hash = std::env::var("PISCES_PASSWORD_HASH").unwrap_or_default();
-    let jwt_secret = std::env::var("PISCES_JWT_SECRET").unwrap_or_default();
     let username = username.trim().to_string();
-    if username.is_empty() || password_hash.is_empty() || jwt_secret.len() < 32 {
-        return Err(
-            "Set PISCES_USERNAME, PISCES_PASSWORD_HASH, and PISCES_JWT_SECRET (32+ characters). Hash a password with: cargo run -- hash-password",
-        );
+    if username.is_empty() {
+        return Err("Set PISCES_USERNAME to the operator name.");
     }
-    if PasswordHash::new(&password_hash).is_err() {
-        return Err("PISCES_PASSWORD_HASH is not an argon2 PHC string.");
+    let jwt_secret = std::env::var("PISCES_JWT_SECRET").unwrap_or_default();
+    if jwt_secret.len() < 32 {
+        return Err("Set PISCES_JWT_SECRET to 32 or more characters.");
     }
+    let (password_hash, source) = resolve_password_hash(
+        std::env::var("PISCES_PASSWORD_HASH").ok(),
+        std::env::var("PISCES_PASSWORD").ok(),
+    )?;
+    println!("pisces auth: user {username}, password from {source}");
     Ok(AuthConfig {
         username,
         password_hash,
         jwt_secret,
     })
+}
+
+fn resolve_password_hash(
+    hash: Option<String>,
+    password: Option<String>,
+) -> Result<(String, &'static str), &'static str> {
+    let hash = hash.unwrap_or_default();
+    let hash = hash.trim();
+    if !hash.is_empty() {
+        if PasswordHash::new(hash).is_err() {
+            return Err("PISCES_PASSWORD_HASH is not an argon2 PHC string.");
+        }
+        return Ok((hash.to_string(), "PISCES_PASSWORD_HASH"));
+    }
+    match password {
+        None => Err("Set PISCES_PASSWORD_HASH (an argon2 PHC string) or PISCES_PASSWORD."),
+        Some(password) if password.is_empty() => {
+            Err("PISCES_PASSWORD is empty; set a password or PISCES_PASSWORD_HASH.")
+        }
+        Some(password) => hash_password(&password)
+            .map(|hash| (hash, "PISCES_PASSWORD (hashed at startup)"))
+            .map_err(|_| "could not hash PISCES_PASSWORD"),
+    }
 }
 
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -116,6 +144,42 @@ mod tests {
             password_hash: hash.into(),
             jwt_secret: "test-secret-test-secret-test-secret".into(),
         }
+    }
+
+    #[test]
+    fn password_hash_wins_over_plain_password() {
+        let hash = hash_password("correct horse").unwrap();
+        let (resolved, source) =
+            resolve_password_hash(Some(hash.clone()), Some("ignored".into())).unwrap();
+        assert_eq!(resolved, hash);
+        assert_eq!(source, "PISCES_PASSWORD_HASH");
+    }
+
+    #[test]
+    fn plain_password_is_hashed_at_startup() {
+        let (hash, source) = resolve_password_hash(None, Some("correct horse".into())).unwrap();
+        assert_eq!(source, "PISCES_PASSWORD (hashed at startup)");
+        assert!(verify_password("correct horse", &hash));
+        assert!(!verify_password("wrong horse", &hash));
+    }
+
+    #[test]
+    fn rejects_missing_empty_and_non_phc_secrets() {
+        assert!(resolve_password_hash(None, None)
+            .unwrap_err()
+            .contains("PISCES_PASSWORD_HASH"));
+        assert!(resolve_password_hash(Some(String::new()), None)
+            .unwrap_err()
+            .contains("PISCES_PASSWORD"));
+        assert!(
+            resolve_password_hash(Some(String::new()), Some(String::new()))
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert_eq!(
+            resolve_password_hash(Some("not-a-hash".into()), None).unwrap_err(),
+            "PISCES_PASSWORD_HASH is not an argon2 PHC string."
+        );
     }
 
     #[test]
