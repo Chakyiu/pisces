@@ -6,16 +6,22 @@ import { ApiError, api } from "../../../../../lib/api";
 import type { Stack, StackContainer } from "../../../../../lib/types";
 import { Badge, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
-import { PageFrame } from "../../../../../components/shell";
+import { PageFrame, useConsole } from "../../../../../components/shell";
 
 function up(container: StackContainer) {
   return container.state === "running" || container.state === "restarting";
 }
 
 export default function StacksPage() {
+  const { current } = useConsole();
   const refreshRef = useRef<() => void>(() => {});
   return (
-    <PageFrame title="Stacks" crumbs={[{ label: "Stacks" }]} onRefresh={() => refreshRef.current()}>
+    <PageFrame
+      title="Stacks"
+      crumbs={[{ label: "Stacks" }]}
+      actions={current ? <Link className="btn primary" href={`/e/${current.id}/stacks/new`}><Icon name="plus" />Add stack</Link> : null}
+      onRefresh={() => refreshRef.current()}
+    >
       <DockerView noun="stacks">{(endpoint) => <Body refreshRef={refreshRef} id={endpoint.id} name={endpoint.name} />}</DockerView>
     </PageFrame>
   );
@@ -117,7 +123,8 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
           ) : (
             <Empty
               title={`No stacks on ${name}.`}
-              body="No container on this endpoint carries a Compose project label. Stacks that Docker Compose already started show up here."
+              body="Deploy a Compose file from here, or start a project on the engine. Either one shows up in this list."
+              action={{ label: "Add stack", href: `/e/${id}/stacks/new`, primary: true }}
             />
           )
         ) : null}
@@ -128,6 +135,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                 <tr>
                   <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={toggleAll} /></label></th>
                   <th>Name</th>
+                  <th>Origin</th>
                   <th>State</th>
                   <th>Containers</th>
                 </tr>
@@ -140,7 +148,10 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <input type="checkbox" aria-label={`Select ${stack.project}`} checked={Boolean(picked[stack.project])} onChange={() => toggle(stack)} />
                       </label>
                     </td>
-                    <td className="name-cell" title={stack.project} translate="no">{stack.project}</td>
+                    <td className="name-cell" title={stack.project} translate="no">
+                      <Link className="name-link" href={`/e/${id}/stacks/${encodeURIComponent(stack.project)}?tab=stack`} translate="no">{stack.project}</Link>
+                    </td>
+                    <td><span className="origin-badge">{stack.origin === "managed" ? "Managed" : "Discovered"}</span></td>
                     <td><Badge state={stack.state} /></td>
                     <td className="stack-containers">
                       <span className="mono">{stack.running}/{stack.total}</span>

@@ -8,7 +8,7 @@ import type { Endpoint } from "../lib/types";
 import { useSession } from "./session";
 import { Gate, Icon, IconButton } from "./bits";
 
-export type Crumb = { label: string; href?: string; mono?: boolean };
+export type Crumb = { label: string; href?: string; mono?: boolean; translate?: "no" };
 
 type ConsoleValue = {
   username: string;
@@ -164,9 +164,9 @@ export function Shell({ children }: { children: ReactNode }) {
                 <span key={`${crumb.label}-${index}`} className="crumb-item">
                   {index > 0 ? <span className="crumb-sep">/</span> : null}
                   {crumb.href ? (
-                    <Link href={crumb.href} className={crumb.mono ? "crumb-name" : "crumb"}>{crumb.label}</Link>
+                    <Link href={crumb.href} className={crumb.mono ? "crumb-name" : "crumb"} translate={crumb.translate}>{crumb.label}</Link>
                   ) : (
-                    <span className={crumb.mono ? "crumb-name" : "crumb"}>{crumb.label}</span>
+                    <span className={crumb.mono ? "crumb-name" : "crumb"} translate={crumb.translate}>{crumb.label}</span>
                   )}
                 </span>
               ))}

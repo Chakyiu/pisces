@@ -25,6 +25,7 @@ type Options = {
   allow401?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
+  failureMessage?: string;
 };
 
 export async function api<T>(path: string, options: Options = {}): Promise<T> {
@@ -60,7 +61,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
   } catch (err) {
     if (err instanceof ApiError) throw err;
     if (options.signal?.aborted) throw new ApiError("cancelled", "cancelled", false);
-    throw new ApiError("daemon_unreachable", ENGINE_DOWN, true);
+    throw new ApiError("daemon_unreachable", options.failureMessage ?? ENGINE_DOWN, true);
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", onParentAbort);

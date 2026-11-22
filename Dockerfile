@@ -1,6 +1,9 @@
 # One image: Next.js UI on :3000 and the Rust API on 127.0.0.1:8787.
 # The API reaches the engine through the mounted /var/run/docker.sock.
 
+FROM docker:27.5.1-cli AS compose-cli
+RUN docker compose version
+
 FROM rust:1-bookworm AS backend
 WORKDIR /src
 COPY backend/Cargo.toml backend/Cargo.lock ./
@@ -25,6 +28,8 @@ ENV NODE_ENV=production \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=compose-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=compose-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
 COPY --from=backend /src/target/release/pisces-backend /usr/local/bin/pisces
 COPY --from=frontend /src/.next/standalone /app
 COPY --from=frontend /src/.next/static /app/.next/static

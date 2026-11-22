@@ -91,6 +91,15 @@ impl ApiError {
             message_is_safe: false,
         }
     }
+
+    pub fn deploy(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            code: "deploy_failed",
+            message: message.into(),
+            retryable: false,
+        }
+    }
 }
 
 #[derive(Serialize)]

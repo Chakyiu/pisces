@@ -41,10 +41,17 @@ export type StackContainer = {
 
 export type Stack = {
   project: string;
+  origin: "managed" | "discovered";
+  hasFile: boolean;
   running: number;
   total: number;
   state: string;
   containers: StackContainer[];
+};
+
+export type StackDetail = Stack & {
+  compose?: string | null;
+  containerDetails?: Container[];
 };
 
 export type Mount = { source: string; destination: string; mode: string };

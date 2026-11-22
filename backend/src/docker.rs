@@ -318,7 +318,7 @@ pub async fn overview() -> Result<Overview, ApiError> {
         )
         .map_err(map_err)?;
         let mut recent: Vec<ContainerOut> = containers.iter().map(container_out).collect();
-        recent.sort_by(|a, b| b.created.cmp(&a.created));
+        recent.sort_by_key(|item| std::cmp::Reverse(item.created));
         recent.truncate(5);
         let volume_count = volumes.volumes.as_ref().map(|v| v.len()).unwrap_or(0) as i64;
         Ok(Overview {
@@ -384,7 +384,7 @@ pub async fn list_containers(q: &str, state: &str) -> Result<Vec<ContainerOut>, 
                     || item.image.to_ascii_lowercase().contains(&q))
         })
         .collect();
-    items.sort_by(|a, b| b.created.cmp(&a.created));
+    items.sort_by_key(|item| std::cmp::Reverse(item.created));
     Ok(items)
 }
 
@@ -1591,7 +1591,7 @@ pub async fn list_images() -> Result<Vec<ImageOut>, ApiError> {
     let docker = docker()?;
     let images = timed(docker.list_images(None::<ListImagesOptions>)).await?;
     let mut items: Vec<ImageOut> = images.into_iter().map(image_out).collect();
-    items.sort_by(|a, b| b.created.cmp(&a.created));
+    items.sort_by_key(|item| std::cmp::Reverse(item.created));
     Ok(items)
 }
 
@@ -2130,7 +2130,7 @@ fn ports_from_map(map: &HashMap<String, Option<Vec<PortBinding>>>) -> Vec<PortOu
             }),
         }
     }
-    ports.sort_by(|a, b| a.container.cmp(&b.container));
+    ports.sort_by_key(|port| port.container);
     ports
 }
 
