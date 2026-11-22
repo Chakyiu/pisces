@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
@@ -162,31 +163,38 @@ function Body({
       <section className="widget">
         <h2>Actions</h2>
         <div className="widget-pad">
-          <div className="bulk">
-            <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
-              <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending) || !isRunning} onClick={() => void act("stop")}>
-              <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
-              <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
-            </button>
-            <button className="btn" type="button" title="Open container console" aria-expanded={consoleOpen} aria-controls="container-console" disabled={Boolean(pending) || !isRunning} onClick={() => setConsoleOpen((open) => !open)}>
-              <Icon name="console" /> Console
-            </button>
-            <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
-              <Icon name="trash" /> Remove
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
-              <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
-              Edit name / restart
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
-              <Icon name="copy" /> Duplicate/Edit
-            </button>
+          <div className="action-bar">
+            <div className="actions" role="group" aria-label="Run and view">
+              <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
+                <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending) || !isRunning} onClick={() => void act("stop")}>
+                <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
+                <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
+              </button>
+              <Link className="btn" href={`/e/${endpointId}/containers/${encodeURIComponent(containerId)}/logs`} title="Open logs and follow new lines">
+                <Icon name="logs" /> Logs
+              </Link>
+              <button className="btn" type="button" title="Open container console" aria-expanded={consoleOpen} aria-controls="container-console" disabled={Boolean(pending) || !isRunning} onClick={() => setConsoleOpen((open) => !open)}>
+                <Icon name="console" /> Console
+              </button>
+            </div>
+            <div className="actions" role="group" aria-label="Change this container">
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
+                <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
+                Edit name / restart
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
+                <Icon name="copy" /> Duplicate/Edit
+              </button>
+              <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
+                <Icon name="trash" /> Remove
+              </button>
+            </div>
           </div>
         </div>
       </section>
