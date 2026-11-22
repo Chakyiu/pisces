@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TELE-116 review fixture — Add stack and stack details</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --surface: #111827;
+      --surface-hover: #1a2535;
+      --surface-active: #1e3a5f;
+      --border: #1e3a5f;
+      --border-subtle: #162035;
+      --accent: #ffb800;
+      --accent-ink: #0b1120;
+      --fg: #e8f0fe;
+      --muted: #8ba3c7;
+      --success: #26de81;
+      --warn: #ff9f43;
+      --danger: #ff4757;
+      --font: "Segoe UI", Helvetica, Arial, sans-serif;
+      --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.5;
+      font-weight: 400;
+    }
+    a { color: var(--fg); }
+    :focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+    .banner {
+      padding: 12px 24px;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+    }
+    .frame { padding: 24px; display: grid; gap: 16px; border-bottom: 1px solid var(--border); }
+    .frame h1 { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.2; letter-spacing: 0; }
+    .kicker {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .title-row { display: flex; align-items: center; gap: 12px; min-height: 36px; }
+    .title-row h1 { flex: 1; }
+    .crumbs { display: flex; gap: 8px; align-items: center; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+    .crumbs .now { color: var(--fg); letter-spacing: 0; text-transform: none; font-family: var(--mono); font-weight: 400; font-size: 14px; }
+    .widget { border: 1px solid var(--border); border-radius: 4px; background: var(--surface); }
+    .widget h2, .widget-title { margin: 0; padding: 12px 16px; font-size: 14px; font-weight: 600; }
+    .pad { padding: 16px; display: grid; gap: 16px; }
+    .label { display: grid; gap: 8px; max-width: 65ch; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+    .field, .editor {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--fg);
+      font: inherit;
+      letter-spacing: 0;
+      text-transform: none;
+      font-weight: 400;
+    }
+    .field { height: 36px; padding: 0 12px; background: var(--surface); }
+    .hint, .note { margin: 0; color: var(--muted); font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; max-width: 65ch; }
+    .field-error { color: var(--danger); font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none; display: inline-flex; gap: 8px; align-items: center; }
+    .fact { display: grid; grid-template-columns: 140px 1fr; gap: 12px; min-height: 44px; align-items: center; padding: 8px 16px; border-top: 1px solid var(--border-subtle); }
+    .fact span { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+    .btn {
+      height: 36px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--fg);
+      padding: 0 12px;
+      font: inherit;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+    .btn.danger { border-color: var(--danger); color: var(--danger); }
+    .btn:disabled { opacity: 0.55; }
+    .actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+    .editor-head, .editor-tools { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+    .editor-head h2 { padding: 0; }
+    .editor-shell { display: grid; grid-template-columns: 40px 1fr; min-height: 240px; border: 1px solid var(--border); border-radius: 4px; overflow: hidden; background: var(--bg); }
+    .gutter { margin: 0; padding: 12px 0; text-align: right; color: var(--muted); font-family: var(--mono); font-size: 12px; letter-spacing: 0.02em; font-variant-numeric: tabular-nums; }
+    .editor { border: 0; border-radius: 0; min-height: 240px; padding: 12px; resize: vertical; font-family: var(--mono); font-size: 14px; line-height: 1.5; }
+    .tabs { display: flex; gap: 8px; }
+    .tab { min-height: 36px; padding: 0 12px; border-radius: 4px; border: 1px solid transparent; background: transparent; color: var(--fg); font: inherit; font-weight: 500; letter-spacing: 0.02em; }
+    .tab[aria-selected="true"] { background: var(--surface-active); border-color: var(--border); }
+    .bulk { display: inline-flex; }
+    .bulk .btn { border-radius: 0; }
+    .bulk .btn + .btn { margin-left: -1px; }
+    .bulk .btn:first-child { border-radius: 4px 0 0 4px; }
+    .bulk .btn:last-child { border-radius: 0 4px 4px 0; }
+    table { width: 100%; border-collapse: collapse; }
+    th { text-align: left; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle); vertical-align: middle; }
+    .mono { font-family: var(--mono); }
+    .badge { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 2px; padding: 2px 8px; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+    .badge.ok { color: var(--success); }
+    .badge.muted { color: var(--muted); }
+    .sq { width: 6px; height: 6px; background: currentColor; display: inline-block; }
+    .state { padding: 16px; display: grid; gap: 8px; justify-items: start; }
+    .state h2 { padding: 0; font-size: 18px; }
+    .state p { margin: 0; color: var(--muted); max-width: 65ch; }
+    .icon { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.5; }
+    .link { text-underline-offset: 3px; }
+  </style>
+</head>
+<body>
+  <p class="banner">Review fixture for TELE-116. Tokens match <code>frontend/app/globals.css</code>. Not a live endpoint. Sample names are ledger and local.</p>
+
+  <section class="frame" aria-labelledby="add-title">
+    <p class="kicker">Add stack · validation</p>
+    <p class="crumbs"><span>Stacks</span><span aria-hidden="true">/</span><span>Add stack</span></p>
+    <div class="title-row"><h1 id="add-title">Add stack</h1></div>
+    <form class="widget">
+      <div class="pad">
+        <label class="label" for="stack-name">
+          Name
+          <input class="field" id="stack-name" name="stack-name" placeholder="e.g. mystack" autocomplete="off" spellcheck="false" aria-invalid="true" aria-describedby="name-hint name-error">
+          <span class="hint" id="name-hint">Lowercase letters, digits, hyphens, and underscores. Must start with a letter or digit. Up to 63 characters.</span>
+          <span class="field-error" id="name-error" role="alert">
+            <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5 14 13.5H2L8 2.5Z"/><path d="M8 7v3M8 11.5h.01"/></svg>
+            Stack name is required
+          </span>
+        </label>
+        <p class="note">This stack will be deployed using <a class="link" href="https://docs.docker.com/compose/" target="_blank" rel="noopener noreferrer">Docker Compose</a>.</p>
+      </div>
+      <div class="fact"><span>Build method</span><strong>Web editor</strong></div>
+      <div class="pad">
+        <div class="editor-head">
+          <h2 id="compose-label">Web editor</h2>
+          <p class="hint">Ctrl+F or ⌘F to search</p>
+        </div>
+        <div class="editor-tools">
+          <p class="note" id="compose-help">You can get more information about the Compose file format in the <a class="link" href="https://docs.docker.com/compose/compose-file/" target="_blank" rel="noopener noreferrer">official documentation</a>.</p>
+          <button class="btn" type="button" disabled title="Nothing to copy">Copy</button>
+        </div>
+        <p class="note">Define or paste the content of your Docker Compose file here.</p>
+        <p class="note">This form sends the Compose file only. It does not upload a build directory or an env file. Images must be ones the engine can pull.</p>
+        <p class="field-error" id="compose-error" role="alert">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5 14 13.5H2L8 2.5Z"/><path d="M8 7v3M8 11.5h.01"/></svg>
+          Stack file content is required
+        </p>
+        <div class="editor-shell">
+          <pre class="gutter" aria-hidden="true">1</pre>
+          <textarea class="editor" name="compose-file" aria-labelledby="compose-label" aria-describedby="compose-help compose-error" aria-invalid="true" spellcheck="false" autocomplete="off"></textarea>
+        </div>
+        <div class="actions">
+          <button class="btn" type="button">Cancel</button>
+          <button class="btn primary" type="submit">Deploy the stack</button>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  <section class="frame" aria-labelledby="detail-title">
+    <p class="kicker">Stack details · managed · Stack tab</p>
+    <p class="crumbs"><span>Stacks</span><span aria-hidden="true">/</span><span class="now">ledger</span></p>
+    <div class="title-row"><h1 id="detail-title">Stack details</h1></div>
+    <div class="tabs" role="tablist" aria-label="Stack views">
+      <button class="tab" type="button" role="tab" aria-selected="true">Stack</button>
+      <button class="tab" type="button" role="tab" aria-selected="false">Editor</button>
+    </div>
+    <section class="widget">
+      <h2>Actions</h2>
+      <div class="pad">
+        <div class="bulk">
+          <button class="btn" type="button" disabled>Start stack</button>
+          <button class="btn" type="button">Stop stack</button>
+          <button class="btn" type="button">Restart stack</button>
+          <button class="btn danger" type="button">Delete stack</button>
+        </div>
+      </div>
+    </section>
+    <section class="widget">
+      <h2>Details</h2>
+      <div class="fact"><span>Name</span><strong class="mono">ledger</strong></div>
+      <div class="fact"><span>Origin</span><strong><span class="badge muted"><i class="sq"></i>Managed</span></strong></div>
+      <div class="fact"><span>State</span><strong><span class="badge ok"><i class="sq"></i>Running</span></strong></div>
+      <div class="fact"><span>Containers</span><strong class="mono">2/2</strong></div>
+      <div class="fact"><span>Endpoint</span><strong>local</strong></div>
+      <div class="fact"><span>Compose file</span><strong>Stored</strong></div>
+    </section>
+    <section class="widget">
+      <h2>Containers</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>State</th><th>Image</th><th>Ports</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">ledger-web-1</td>
+            <td><span class="badge ok"><i class="sq"></i>running</span></td>
+            <td class="mono">example/web:1</td>
+            <td class="mono">8080:80</td>
+          </tr>
+          <tr>
+            <td class="mono">ledger-redis-1</td>
+            <td><span class="badge ok"><i class="sq"></i>running</span></td>
+            <td class="mono">redis:7</td>
+            <td class="mono">—</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </section>
+
+  <section class="frame" aria-labelledby="editor-title">
+    <p class="kicker">Stack details · discovered · Editor tab</p>
+    <div class="tabs" role="tablist" aria-label="Stack views">
+      <button class="tab" type="button" role="tab" aria-selected="false">Stack</button>
+      <button class="tab" type="button" role="tab" aria-selected="true">Editor</button>
+    </div>
+    <section class="widget">
+      <div class="state">
+        <h2 id="editor-title">No Compose file stored</h2>
+        <p>Pisces found ledger from container labels on local. It does not have the file that created those containers, so there is nothing to edit.</p>
+      </div>
+    </section>
+  </section>
+</body>
+</html>
