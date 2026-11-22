@@ -143,7 +143,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <table>
               <thead>
                 <tr>
-                  <th className="col-check"><span className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={toggleAll} /></span></th>
+                  <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={toggleAll} /></label></th>
                   <th>Name</th>
                   <th>State</th>
                   <th>Quick actions</th>
@@ -156,9 +156,9 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                 {items.map((item) => (
                   <tr key={item.id}>
                     <td className="col-check">
-                      <span className="check">
+                      <label className="check">
                         <input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.id])} onChange={() => toggle(item)} />
-                      </span>
+                      </label>
                     </td>
                     <td className="name-cell" title={item.name}>
                       <Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link>

@@ -101,7 +101,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <table>
               <thead>
                 <tr>
-                  <th className="col-check"><span className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={() => setPicked(allChecked ? {} : Object.fromEntries(items.map((item) => [item.name, item])))} /></span></th>
+                  <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={() => setPicked(allChecked ? {} : Object.fromEntries(items.map((item) => [item.name, item])))} /></label></th>
                   <th>Name</th><th>Driver</th><th>Scope</th><th>Subnet</th><th>Containers</th>
                 </tr>
               </thead>
@@ -109,7 +109,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                 {items.map((item) => (
                   <tr key={item.name}>
                     <td className="col-check">
-                      <span className="check">
+                      <label className="check">
                         <input
                           type="checkbox"
                           aria-label={`Select ${item.name}`}
@@ -117,7 +117,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                           title={item.removable ? undefined : `${item.name} cannot be removed.`}
                           onChange={() => setPicked((prev) => { const next = { ...prev }; if (next[item.name]) delete next[item.name]; else next[item.name] = item; return next; })}
                         />
-                      </span>
+                      </label>
                     </td>
                     <td>{item.name}</td>
                     <td className="mono">{item.driver}</td>
