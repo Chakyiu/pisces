@@ -227,6 +227,7 @@ textarea.field {
   white-space: nowrap;
 }
 .env-icon { display: inline-flex; }
+.env-current .icon-btn .icon { width: 24px; height: 24px; }
 .sidebar-footer {
   margin-top: auto;
   padding: 12px;
