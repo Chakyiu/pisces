@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, type ReactNode } from "react";
+import Link from "next/link";
 import { clock } from "../lib/format";
 
 export function Icon({ name }: { name: string }) {
@@ -109,12 +110,13 @@ export function ErrorState({
   );
 }
 
-export function Empty({ title, body, action }: { title: string; body: string; action?: { label: string; onClick: () => void; primary?: boolean } }) {
+export function Empty({ title, body, action }: { title: string; body: string; action?: { label: string; onClick?: () => void; href?: string; primary?: boolean } }) {
   return (
     <div className="state">
       <h2>{title}</h2>
       <p>{body}</p>
-      {action ? <button className={action.primary ? "btn primary" : "btn"} onClick={action.onClick}>{action.label}</button> : null}
+      {action?.href ? <Link className={action.primary ? "btn primary" : "btn"} href={action.href}>{action.label}</Link> : null}
+      {action?.onClick ? <button className={action.primary ? "btn primary" : "btn"} onClick={action.onClick}>{action.label}</button> : null}
     </div>
   );
 }

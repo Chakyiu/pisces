@@ -234,7 +234,7 @@ function Body({
       {recreateOpen ? (
         <Dialog title={`Recreate ${detail.name}?`} onClose={() => setRecreateOpen(false)}>
           <p>
-            A new container is built from {detail.name}'s current config and takes its name
+            A new container is built from {detail.name}’s current config and takes its name
             {isRunning ? `; ${detail.name} is stopped first` : ""}. The writable layer is discarded
             and the container id changes. Named volumes and custom networks carry over.
           </p>

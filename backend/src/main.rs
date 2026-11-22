@@ -6,6 +6,7 @@ mod error;
 mod http;
 mod k8s;
 mod page;
+mod stacks;
 mod store;
 
 use std::io::{self, Read};
@@ -31,6 +32,7 @@ async fn main() {
     let state = http::AppState {
         auth,
         store: Arc::new(Mutex::new(store)),
+        stack_apply: Arc::new(http::StackApplyLocks::default()),
     };
     let app = http::router(state);
 

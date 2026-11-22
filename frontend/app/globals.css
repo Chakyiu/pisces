@@ -408,6 +408,32 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle
 .name-link { text-decoration: underline; text-underline-offset: 3px; }
 .col-check { width: 52px; text-align: center; padding: 2px 4px; }
 .stack-containers { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; padding: 6px 12px; }
+.origin-badge { display: inline-flex; border: 1px solid var(--border); border-radius: 2px; padding: 2px 8px; color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
+.stack-form { display: grid; gap: 16px; }
+.stack-field-wrap { display: grid; gap: 8px; max-width: 65ch; }
+.stack-note { max-width: 65ch; margin: 0; color: var(--muted); }
+.stack-note a, .compose-docs a { text-decoration: underline; text-underline-offset: 3px; }
+.stack-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.compose-editor { display: grid; gap: 8px; min-width: 0; }
+.compose-editor h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+.compose-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.compose-docs { margin: 0; }
+.compose-well { display: grid; grid-template-columns: 44px minmax(0, 1fr); min-height: 320px; max-height: 65vh; overflow: hidden; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
+.compose-gutter { overflow: hidden; margin: 0; padding: 10px 8px; color: var(--muted); text-align: right; font-family: var(--mono); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; user-select: none; }
+.compose-area { display: block; width: 100%; min-width: 0; min-height: 320px; height: 65vh; max-height: 65vh; overflow: auto; resize: none; padding: 10px 12px; border: 0; outline: 0; background: transparent; color: var(--fg); font-family: var(--mono); font-size: 14px; font-weight: 400; line-height: 1.5; letter-spacing: 0; white-space: pre; tab-size: 2; }
+.compose-area:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
+.compose-area:disabled { opacity: .7; }
+.compose-caption-row { display: flex; justify-content: space-between; gap: 12px; min-height: 18px; }
+.stack-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.stack-tab { min-height: 40px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); }
+.stack-tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--fg); }
+.stack-panel { display: grid; gap: 16px; min-width: 0; }
+.stack-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.stack-fact { min-width: 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); display: grid; gap: 4px; }
+.stack-fact span { color: var(--muted); font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
+.stack-fact strong { min-width: 0; overflow-wrap: anywhere; font-weight: 400; }
+.stack-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.stack-status { min-height: 20px; color: var(--muted); }
 .check {
   width: 36px;
   height: 36px;
@@ -589,6 +615,14 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .nav a, .btn, .icon-btn, .menu button, .tile, .sidebar, .main, .scrim, .switch i { transition: none; animation: none; }
+}
+
+@media (max-width: 560px) {
+  .content { padding: 12px; }
+  .compose-well { min-height: 240px; }
+  .compose-area { min-height: 240px; height: 50vh; max-height: 50vh; font-size: 13px; }
+  .stack-facts { grid-template-columns: 1fr; }
+  .stack-actions { justify-content: flex-start; flex-wrap: wrap; }
 }
 
 @media (max-width: 1100px) {
