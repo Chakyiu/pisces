@@ -3,13 +3,17 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::rejection::JsonRejection;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 use crate::auth::{self, AuthConfig};
 use crate::docker;
@@ -70,6 +74,19 @@ struct ListQuery {
 }
 
 #[derive(Deserialize)]
+struct ConsoleQuery {
+    shell: Option<String>,
+    user: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ConsoleMessage {
+    Input { data: String },
+    Resize { width: u16, height: u16 },
+}
+
+#[derive(Deserialize)]
 struct RunBody {
     image: String,
     name: Option<String>,
@@ -123,6 +140,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/endpoints/{id}/containers/{container_id}/logs",
             get(container_logs),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/console",
+            get(container_console),
         )
         .route(
             "/api/endpoints/{id}/containers/{container_id}/start",
@@ -391,6 +412,159 @@ async fn container_logs(
     Ok(Json(serde_json::json!({ "lines": lines })))
 }
 
+async fn container_console(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+    Query(query): Query<ConsoleQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?.to_string();
+    if !websocket_same_origin(&headers) {
+        return Err(ApiError::unauthorized(
+            "Cross-origin WebSocket request rejected.",
+        ));
+    }
+    let command = docker::console_command(query.shell.as_deref())?;
+    let user = docker::console_user(query.user.as_deref())?;
+    Ok(ws
+        .max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| console_socket(socket, container_id, command, user)))
+}
+
+fn websocket_same_origin(headers: &HeaderMap) -> bool {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uri>().ok());
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    origin.as_ref().is_some_and(|origin| {
+        matches!(origin.scheme_str(), Some("http" | "https"))
+            && origin
+                .path_and_query()
+                .is_none_or(|path| path.as_str() == "/")
+            && origin.authority().is_some_and(|authority| {
+                host.is_some_and(|host| authority.as_str().eq_ignore_ascii_case(host))
+            })
+    })
+}
+
+async fn console_socket(
+    mut socket: WebSocket,
+    container_id: String,
+    command: &'static str,
+    user: Option<&'static str>,
+) {
+    let (docker, exec_id) = match docker::create_console_exec(&container_id, command, user).await {
+        Ok(exec) => exec,
+        Err(_) => {
+            send_console_error(
+                &mut socket,
+                format!("Could not start {command}. Confirm the container is running and that shell is installed."),
+            )
+            .await;
+            return;
+        }
+    };
+    let (mut output, mut input) = match docker::start_console_exec(&docker, &exec_id).await {
+        Ok(bollard::exec::StartExecResults::Attached { output, input }) => (output, input),
+        Ok(bollard::exec::StartExecResults::Detached) => {
+            send_console_error(&mut socket, "Docker did not attach the console.".into()).await;
+            return;
+        }
+        Err(_) => {
+            send_console_error(
+                &mut socket,
+                format!("Could not start {command}. Confirm the container is running and that shell is installed."),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let mut disconnected = false;
+    let mut first_output = true;
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(message) = serde_json::from_str::<ConsoleMessage>(&text) {
+                        match message {
+                            ConsoleMessage::Input { data } if data.len() <= 32 * 1024 => {
+                                if input.write_all(data.as_bytes()).await.is_err() { break; }
+                                let _ = input.flush().await;
+                            }
+                            ConsoleMessage::Resize { width, height }
+                                if (1..=500).contains(&width) && (1..=500).contains(&height) => {
+                                docker::resize_console_exec(&docker, &exec_id, width, height).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(Ok(Message::Ping(data))) => {
+                    if socket.send(Message::Pong(data)).await.is_err() { break; }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                    disconnected = true;
+                    break;
+                }
+                _ => {}
+            },
+            outgoing = output.next() => match outgoing {
+                Some(Ok(line)) => {
+                    let bytes = line.into_bytes();
+                    if first_output {
+                        first_output = false;
+                        if missing_console_shell(&bytes, command) {
+                            send_console_error(
+                                &mut socket,
+                                format!("The selected shell {command} is not installed in this container. Choose another shell."),
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+                    if socket.send(Message::Binary(bytes)).await.is_err() {
+                        disconnected = true;
+                        break;
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+    }
+
+    // Ctrl-C stops a foreground command; EOF then exits the interactive shell.
+    // Closing both halves also releases the Docker hijacked connection.
+    let _ = tokio::time::timeout(Duration::from_secs(1), input.write_all(b"\x03\x04")).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), input.flush()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), input.shutdown()).await;
+    if disconnected {
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while output.next().await.is_some() {}
+        })
+        .await;
+    }
+    let _ = socket.close().await;
+}
+
+fn missing_console_shell(output: &[u8], command: &str) -> bool {
+    let output = String::from_utf8_lossy(output);
+    output.contains(command) && output.contains("no such file or directory")
+}
+
+async fn send_console_error(socket: &mut WebSocket, message: String) {
+    let _ = socket
+        .send(Message::Text(format!("{message}\r\n").into()))
+        .await;
+    let _ = socket.close().await;
+}
+
 async fn start_container(
     State(state): State<AppState>,
     Path((id, container_id)): Path<(String, String)>,
@@ -589,5 +763,55 @@ fn endpoint_out(endpoint: Endpoint, docker_up: bool) -> EndpointOut {
         name: endpoint.name,
         kind: endpoint.kind,
         status: status.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    fn headers(host: &'static str, origin: &'static str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static(host));
+        headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
+        headers
+    }
+
+    #[test]
+    fn websocket_requires_matching_http_origin_and_host() {
+        assert!(websocket_same_origin(&headers(
+            "pisces.example:3000",
+            "https://pisces.example:3000"
+        )));
+        assert!(websocket_same_origin(&headers(
+            "localhost:3000",
+            "http://localhost:3000/"
+        )));
+        assert!(!websocket_same_origin(&headers(
+            "pisces.example:3000",
+            "https://attacker.example"
+        )));
+        assert!(!websocket_same_origin(&headers(
+            "pisces.example:3000",
+            "https://pisces.example:3000/other"
+        )));
+        let mut missing_origin = HeaderMap::new();
+        missing_origin.insert(
+            header::HOST,
+            HeaderValue::from_static("pisces.example:3000"),
+        );
+        assert!(!websocket_same_origin(&missing_origin));
+    }
+
+    #[test]
+    fn reports_a_shell_that_is_not_installed() {
+        assert!(missing_console_shell(
+            b"kiri: cannot start container: exec /bin/bash: stat /bin/bash: no such file or directory",
+            "/bin/bash"
+        ));
+        assert!(!missing_console_shell(
+            b"/bin/bash: command not found",
+            "/bin/bash"
+        ));
     }
 }
