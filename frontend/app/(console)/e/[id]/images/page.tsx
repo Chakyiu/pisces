@@ -129,7 +129,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <table>
               <thead>
                 <tr>
-                  <th className="col-check"><span className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={() => setPicked(allChecked ? {} : Object.fromEntries(items.map((item) => [item.id, item])))} /></span></th>
+                  <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={() => setPicked(allChecked ? {} : Object.fromEntries(items.map((item) => [item.id, item])))} /></label></th>
                   <th>Tag</th>
                   <th>ID</th>
                   <th>Size</th>
@@ -141,9 +141,9 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                 {items.map((item) => (
                   <tr key={item.id}>
                     <td className="col-check">
-                      <span className="check">
+                      <label className="check">
                         <input type="checkbox" aria-label={`Select ${imageLabel(item.tags)}`} checked={Boolean(picked[item.id])} onChange={() => toggle(item)} />
-                      </span>
+                      </label>
                     </td>
                     <td className="mono name-cell" title={imageLabel(item.tags)}>{imageLabel(item.tags)}</td>
                     <td className="mono" title={item.id}>{shortId(item.id)}</td>
