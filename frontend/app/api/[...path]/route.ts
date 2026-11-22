@@ -20,12 +20,24 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   const contentType = req.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
 
+  // Following logs is a long-lived stream: it must outlive the 10 s abort every
+  // other call gets, or follow dies on a quiet container. The Rust side serves it
+  // with no collection timeout either.
+  const streaming = /\/logs\/stream$/.test(`/${path.join("/")}`);
+
   const init: RequestInit = {
     method: req.method,
     headers,
     redirect: "manual",
-    signal: AbortSignal.timeout(10_000),
   };
+  if (streaming) {
+    // Tie the upstream stream to this request: when the browser aborts (Follow
+    // off, navigation away) the Rust side must see the connection close too,
+    // instead of following a container nobody is watching.
+    init.signal = req.signal;
+  } else {
+    init.signal = AbortSignal.timeout(10_000);
+  }
   if (req.method !== "GET" && req.method !== "HEAD") {
     init.body = await req.arrayBuffer();
   }

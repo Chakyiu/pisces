@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../../lib/api";
+import { streamLogs } from "../../../../../../../lib/log-stream";
 import type { ContainerDetail, LogLine } from "../../../../../../../lib/types";
 import { Icon } from "../../../../../../../components/bits";
 import { DockerView } from "../../../../../../../components/gate";
@@ -53,6 +54,10 @@ function Body({
   const [tail, setTail] = useState(200);
   const [appliedTail, setAppliedTail] = useState(200);
   const [copied, setCopied] = useState("");
+  const [follow, setFollow] = useState(false);
+  const [followState, setFollowState] = useState<"live" | "ended" | "error">("live");
+  const [followMessage, setFollowMessage] = useState("");
+  const endRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => setAppliedTail(Math.min(200, Math.max(1, tail || 1))), 300);
@@ -60,6 +65,9 @@ function Body({
   }, [tail]);
 
   useEffect(() => {
+    // While following, the stream owns the pane: a reload must not replace the
+    // lines it has been appending with a fresh one-shot snapshot.
+    if (follow) return;
     let cancel = false;
     setStatus("loading");
     api<ContainerDetail>(`/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}`)
@@ -77,7 +85,53 @@ function Body({
         setStatus("error");
       });
     return () => { cancel = true; };
-  }, [endpointId, containerId, appliedTail, reload, onName]);
+  }, [endpointId, containerId, appliedTail, reload, onName, follow]);
+
+  useEffect(() => {
+    if (!follow) return;
+    const ctrl = new AbortController();
+    let closed = false;
+    let queued: LogLine[] = [];
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      timer = null;
+      if (closed || queued.length === 0) return;
+      const next = queued;
+      queued = [];
+      setLines((prev) => {
+        const merged = [...(prev ?? []), ...next];
+        return merged.length > 2000 ? merged.slice(-2000) : merged;
+      });
+    };
+    setFollowState("live");
+    setFollowMessage("");
+    void streamLogs(`/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}/logs/stream?tail=0`, {
+      signal: ctrl.signal,
+      onLine: (line) => {
+        queued.push(line);
+        if (!timer) timer = setTimeout(flush, 200);
+      },
+      onError: (text) => {
+        if (closed) return;
+        flush();
+        setFollowMessage(text);
+        setFollowState("error");
+      },
+    }).then(() => {
+      if (closed) return;
+      flush();
+      setFollowState((state) => (state === "error" ? "error" : "ended"));
+    });
+    return () => {
+      closed = true;
+      if (timer) clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [follow, endpointId, containerId]);
+
+  useEffect(() => {
+    if (follow) endRef.current?.scrollIntoView({ block: "nearest" });
+  }, [lines, follow]);
 
   const query = q.trim().toLowerCase();
   const shown = (lines ?? []).filter((line) => !query || `${line.timestamp} ${line.stream} ${line.text}`.toLowerCase().includes(query));
@@ -112,6 +166,19 @@ function Body({
         <input className="field" type="number" min={1} max={200} value={tail} onChange={(event) => setTail(Number(event.target.value))} style={{ maxWidth: 120 }} />
       </label>
       <div className="setting">
+        <span>Follow</span>
+        <button className={follow ? "switch on" : "switch"} type="button" role="switch" aria-checked={follow} aria-label="Follow new log lines" onClick={() => setFollow((value) => !value)}><i /></button>
+      </div>
+      {follow ? (
+        <p className="note" role="status" style={{ margin: "0 16px 8px" }}>
+          {followState === "error"
+            ? `Follow stopped: ${followMessage}`
+            : followState === "ended"
+              ? "Follow ended — the container stopped or was removed."
+              : "Following — new lines appear as the container writes them."}
+        </p>
+      ) : null}
+      <div className="setting">
         <span>Actions</span>
         <span>
           <button className="btn" type="button" onClick={() => void copy()}><Icon name="copy" /> Copy</button>
@@ -130,6 +197,7 @@ function Body({
             {line.text}
           </p>
         ))}
+        <div ref={endRef} />
       </div>
     </section>
   );

@@ -3,7 +3,7 @@
 //! On Windows the daemon is the named pipe `//./pipe/docker_engine`.
 //! Every Docker endpoint uses that local engine. Socket paths are not accepted.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
@@ -486,6 +486,122 @@ pub async fn logs(id: &str, tail: usize) -> Result<Vec<LogLine>, ApiError> {
         Ok(result) => result,
         Err(_) => Err(ApiError::daemon(ENGINE_DOWN)),
     }
+}
+
+/// Docker cuts its log stream at arbitrary byte boundaries, so one line — and even
+/// one multi-byte UTF-8 character — can arrive split across two chunks. Buffers are
+/// kept per stream (`stdout` / `stderr`) so interleaved frames never merge.
+#[derive(Default)]
+pub struct LogLines {
+    buffers: HashMap<String, Vec<u8>>,
+}
+
+impl LogLines {
+    pub fn push(&mut self, stream: &str, chunk: &[u8]) -> Vec<LogLine> {
+        let buffer = self.buffers.entry(stream.to_string()).or_default();
+        buffer.extend_from_slice(chunk);
+        let mut lines = Vec::new();
+        while let Some(index) = buffer.iter().position(|byte| *byte == b'\n') {
+            let raw: Vec<u8> = buffer.drain(..=index).collect();
+            push_line(&mut lines, stream, &raw[..raw.len() - 1]);
+        }
+        lines
+    }
+
+    /// Emit what is still buffered when the stream ends. Docker lines normally end
+    /// with a newline; a container killed mid-line leaves one without.
+    pub fn flush(&mut self) -> Vec<LogLine> {
+        let mut lines = Vec::new();
+        for (stream, buffer) in self.buffers.iter_mut() {
+            if buffer.is_empty() {
+                continue;
+            }
+            let raw = std::mem::take(buffer);
+            push_line(&mut lines, stream, &raw);
+        }
+        lines
+    }
+}
+
+fn push_line(lines: &mut Vec<LogLine>, stream: &str, raw: &[u8]) {
+    let raw = String::from_utf8_lossy(raw);
+    let raw = raw.trim_end_matches('\r');
+    if raw.is_empty() {
+        return;
+    }
+    let (timestamp, text) = split_timestamp(raw);
+    lines.push(LogLine {
+        timestamp,
+        stream: stream.to_string(),
+        text,
+    });
+}
+
+/// One NDJSON record. A mid-stream failure arrives as a final
+/// `{"error": true, "message": ...}` record because the response headers were
+/// already sent, so the status code can no longer carry it.
+pub fn encode_event(item: Result<LogLine, ApiError>) -> String {
+    match item {
+        Ok(line) => serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_string()),
+        Err(err) => serde_json::json!({ "error": true, "message": err.message }).to_string(),
+    }
+}
+
+/// Follow a container's log stream. Nothing here is wrapped in `TIMEOUT`: the
+/// stream lives as long as the container keeps writing. Callers drop it to stop.
+pub fn follow_logs(
+    id: &str,
+    tail: usize,
+) -> Result<impl futures_util::Stream<Item = Result<LogLine, ApiError>> + Send, ApiError> {
+    let docker = docker()?;
+    let tail = tail.clamp(0, 200);
+    let options = LogsOptionsBuilder::new()
+        .stdout(true)
+        .stderr(true)
+        .timestamps(true)
+        .follow(true)
+        .tail(&tail.to_string())
+        .build();
+    let upstream = docker.logs(id, Some(options));
+    let state = (
+        upstream,
+        LogLines::default(),
+        VecDeque::<Result<LogLine, ApiError>>::new(),
+        false,
+    );
+    Ok(futures_util::stream::unfold(
+        state,
+        |(mut upstream, mut lines, mut pending, mut ended)| async move {
+            loop {
+                if let Some(item) = pending.pop_front() {
+                    return Some((item, (upstream, lines, pending, ended)));
+                }
+                if ended {
+                    return None;
+                }
+                match upstream.next().await {
+                    Some(Ok(output)) => {
+                        let (stream, bytes) = match output {
+                            LogOutput::StdErr { message } => ("stderr", message),
+                            LogOutput::StdOut { message } | LogOutput::Console { message } => {
+                                ("stdout", message)
+                            }
+                            LogOutput::StdIn { .. } => continue,
+                        };
+                        pending.extend(lines.push(stream, &bytes).into_iter().map(Ok));
+                    }
+                    Some(Err(err)) => {
+                        ended = true;
+                        return Some((Err(map_err(err)), (upstream, lines, pending, ended)));
+                    }
+                    None => {
+                        ended = true;
+                        pending.extend(lines.flush().into_iter().map(Ok));
+                    }
+                }
+            }
+        },
+    ))
 }
 
 pub async fn start_container(id: &str) -> Result<(), ApiError> {
@@ -1337,5 +1453,92 @@ mod tests {
         assert_eq!(console_user(None).ok(), Some(None));
         assert_eq!(console_user(Some("root")).ok(), Some(Some("0")));
         assert!(console_user(Some("0;id")).is_err());
+    }
+
+    fn joined(lines: Vec<LogLine>) -> Vec<(String, String)> {
+        lines
+            .into_iter()
+            .map(|line| (line.stream, line.text))
+            .collect()
+    }
+
+    #[test]
+    fn partial_line_is_held_until_its_newline_arrives() {
+        let mut lines = LogLines::default();
+        assert!(lines.push("stdout", b"hel").is_empty());
+        assert!(lines.push("stdout", b"lo wor").is_empty());
+        assert_eq!(
+            joined(lines.push("stdout", b"ld\nnext")),
+            vec![("stdout".to_string(), "hello world".to_string())]
+        );
+        assert!(lines.push("stdout", b"").is_empty());
+        assert_eq!(
+            joined(lines.flush()),
+            vec![("stdout".to_string(), "next".to_string())]
+        );
+    }
+
+    #[test]
+    fn one_chunk_can_carry_several_lines_and_crlf() {
+        let mut lines = LogLines::default();
+        assert_eq!(
+            joined(lines.push("stderr", b"one\r\ntwo\n\nthree\n")),
+            vec![
+                ("stderr".to_string(), "one".to_string()),
+                ("stderr".to_string(), "two".to_string()),
+                ("stderr".to_string(), "three".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn split_multibyte_character_survives_the_chunk_boundary() {
+        let mut lines = LogLines::default();
+        let bytes = "héllo wörld\n".as_bytes();
+        let split = bytes.iter().position(|byte| *byte == 0xc3).unwrap() + 1;
+        assert!(lines.push("stdout", &bytes[..split]).is_empty());
+        assert_eq!(
+            joined(lines.push("stdout", &bytes[split..])),
+            vec![("stdout".to_string(), "héllo wörld".to_string())]
+        );
+    }
+
+    #[test]
+    fn stdout_and_stderr_buffers_do_not_merge() {
+        let mut lines = LogLines::default();
+        assert!(lines.push("stdout", b"out").is_empty());
+        assert_eq!(
+            joined(lines.push("stderr", b"err\n")),
+            vec![("stderr".to_string(), "err".to_string())]
+        );
+        assert_eq!(
+            joined(lines.flush()),
+            vec![("stdout".to_string(), "out".to_string())]
+        );
+    }
+
+    #[test]
+    fn timestamps_are_split_off_and_kept() {
+        let mut lines = LogLines::default();
+        let pushed = lines.push("stdout", b"2026-01-02T03:04:05.678901Z hello\n");
+        assert_eq!(pushed[0].timestamp, "03:04:05");
+        assert_eq!(
+            joined(pushed),
+            vec![("stdout".to_string(), "hello".to_string())]
+        );
+    }
+
+    #[test]
+    fn error_travels_as_a_final_ndjson_record() {
+        let record = encode_event(Err(ApiError::daemon("engine went away")));
+        let parsed: serde_json::Value = serde_json::from_str(&record).unwrap();
+        assert_eq!(parsed["error"], serde_json::json!(true));
+        assert_eq!(parsed["message"], serde_json::json!("engine went away"));
+        let line = encode_event(Ok(LogLine {
+            timestamp: "t".to_string(),
+            stream: "stdout".to_string(),
+            text: "x".to_string(),
+        }));
+        assert!(!line.contains("\"error\""));
     }
 }
