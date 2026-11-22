@@ -14,20 +14,19 @@ placeholder, and the only Kubernetes thing that works is saving a context.
 
 ## Screens
 
-Screens from the UI/UX pass. Every screen below exists in the current Docker build;
-nothing Kubernetes is shown because nothing Kubernetes is implemented.
+Screens from the approved UI/UX layout.
 
 ![Sign in](docs/images/screenshots/01-login.png)
 *Sign in — one operator account, configured on the container, no sign-up.*
 
-![No endpoint yet](docs/images/screenshots/02-no-endpoint.png)
-*No endpoint yet — add this machine's Docker engine before the console opens.*
+![Home with no endpoint](docs/images/screenshots/03-home-empty.png)
+*Home with no endpoint yet — add this machine's Docker engine, or save a Kubernetes context.*
 
-![Containers](docs/images/screenshots/03-containers.png)
-*Containers — state, ports, and start/stop/restart/remove per container.*
+![Containers](docs/images/screenshots/06-containers.png)
+*Containers — state, image, created, and ports, with start/stop/restart/remove.*
 
-![Container detail](docs/images/screenshots/04-container-detail.png)
-*Container detail — inspect fields and the live log tail.*
+![Container detail](docs/images/screenshots/07-container-detail.png)
+*Container detail — actions, status, and the inspect fields.*
 
 The mark in the README is the app icon: `frontend/app/icon.svg` is the source, and the same
 art is wired as the favicon, the Apple touch icon, and the 192/512 icons in the web app
