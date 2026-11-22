@@ -108,6 +108,15 @@ struct VolumeBody {
 }
 
 #[derive(Deserialize)]
+struct DuplicateBody {
+    name: String,
+    image: Option<String>,
+    env: Option<Vec<String>>,
+    ports: Option<Vec<String>>,
+    restart_policy: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct NetworkBody {
     name: String,
     driver: Option<String>,
@@ -161,6 +170,18 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/endpoints/{id}/containers/{container_id}/restart",
             post(restart_container),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/config",
+            get(container_config),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/duplicate",
+            post(duplicate_container),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/recreate",
+            post(recreate_container),
         )
         .route("/api/endpoints/{id}/images", get(list_images))
         .route(
@@ -675,6 +696,44 @@ async fn delete_image(
     let image_ref = docker::object_ref(&image_ref)?;
     docker::remove_image(image_ref).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn container_config(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+) -> Result<Json<docker::ContainerConfigOut>, ApiError> {
+    require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?;
+    Ok(Json(docker::container_config(container_id).await?))
+}
+
+async fn duplicate_container(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+    body: Result<Json<DuplicateBody>, JsonRejection>,
+) -> Result<(StatusCode, Json<docker::CreatedContainer>), ApiError> {
+    let body = take_json(body)?;
+    require_docker(&state, &id)?;
+    let source = docker::object_ref(&container_id)?;
+    let name = docker::checked_container_name(&body.name)?;
+    let edits = docker::ContainerEdits {
+        image: body.image,
+        env: body.env,
+        ports: body.ports,
+        restart: body.restart_policy,
+    };
+    // Keeping the original name is Portainer's "Duplicate/Edit" replace path.
+    let created = docker::duplicate_or_replace(source, &name, &edits).await?;
+    Ok((StatusCode::CREATED, Json(created)))
+}
+
+async fn recreate_container(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+) -> Result<Json<docker::CreatedContainer>, ApiError> {
+    require_docker(&state, &id)?;
+    let source = docker::object_ref(&container_id)?;
+    Ok(Json(docker::recreate_container(source, None).await?))
 }
 
 async fn list_volumes(

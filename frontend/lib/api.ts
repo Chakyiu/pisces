@@ -24,11 +24,12 @@ type Options = {
   body?: unknown;
   allow401?: boolean;
   signal?: AbortSignal;
+  timeoutMs?: number;
 };
 
 export async function api<T>(path: string, options: Options = {}): Promise<T> {
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  const timer = setTimeout(() => ctrl.abort(), options.timeoutMs ?? 10_000);
   const onParentAbort = () => ctrl.abort();
   options.signal?.addEventListener("abort", onParentAbort);
   try {

@@ -31,6 +31,11 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   // with no collection timeout either.
   const streaming = /\/logs\/stream$/.test(`/${path.join("/")}`);
 
+  // Duplicate/Edit and Recreate stop a container inside the engine call, so
+  // they need the same exemption from the 10 s abort as the log stream — with
+  // a bound, because they are supposed to finish.
+  const slow = /\/(duplicate|recreate)$/.test(`/${path.join("/")}`);
+
   const init: RequestInit = {
     method: req.method,
     headers,
@@ -42,6 +47,8 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     // instead of following a container nobody is watching.
     init.signal = req.signal;
     (init as RequestInit & { dispatcher: Agent }).dispatcher = followDispatcher;
+  } else if (slow) {
+    init.signal = AbortSignal.timeout(120_000);
   } else {
     init.signal = AbortSignal.timeout(10_000);
   }

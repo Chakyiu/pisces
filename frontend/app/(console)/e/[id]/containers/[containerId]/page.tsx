@@ -7,6 +7,7 @@ import { blank, portList, shortId, stamp } from "../../../../../../lib/format";
 import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerConsole } from "../../../../../../components/container-console";
+import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
 
@@ -57,6 +58,8 @@ function Body({
   const [alert, setAlert] = useState("");
   const [confirm, setConfirm] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
+  const [editOpen, setEditOpen] = useState(false);
+  const [recreateOpen, setRecreateOpen] = useState(false);
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -96,6 +99,26 @@ function Body({
     } finally {
       setPending("");
       setConfirm(false);
+    }
+  }
+
+  async function recreate() {
+    setPending("recreate");
+    setAlert("");
+    setRecreateOpen(false);
+    try {
+      const created = await api<{ id: string; name: string }>(
+        `/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}/recreate`,
+        { method: "POST", timeoutMs: 120_000 },
+      );
+      // The old container is gone: replace it in history so Back does not land there.
+      router.replace(`/e/${endpointId}/containers/${encodeURIComponent(created.id)}`);
+    } catch (err) {
+      const text = err instanceof ApiError ? err.message : "The engine did not answer.";
+      if (err instanceof ApiError) publishApiError(err.code);
+      setAlert(`Recreate failed. ${text}`);
+    } finally {
+      setPending("");
     }
   }
 
@@ -153,6 +176,12 @@ function Body({
             <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
               <Icon name="trash" /> Remove
             </button>
+            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
+              <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
+            </button>
+            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
+              <Icon name="copy" /> Duplicate/Edit
+            </button>
           </div>
         </div>
       </section>
@@ -201,6 +230,32 @@ function Body({
             </button>
           </div>
         </Dialog>
+      ) : null}
+      {recreateOpen ? (
+        <Dialog title={`Recreate ${detail.name}?`} onClose={() => setRecreateOpen(false)}>
+          <p>
+            A new container is built from {detail.name}'s current config and takes its name
+            {isRunning ? `; ${detail.name} is stopped first` : ""}. The writable layer is discarded
+            and the container id changes. Named volumes and custom networks carry over.
+          </p>
+          <div className="dialog-actions">
+            <button className="btn" data-focus="first" type="button" onClick={() => setRecreateOpen(false)}>Cancel</button>
+            <button className="btn danger" type="button" onClick={() => void recreate()}>
+              Recreate
+            </button>
+          </div>
+        </Dialog>
+      ) : null}
+      {editOpen ? (
+        <ContainerDuplicateDialog
+          endpointId={endpointId}
+          containerId={containerId}
+          onClose={() => setEditOpen(false)}
+          onCreated={(created) => {
+            setEditOpen(false);
+            router.push(`/e/${endpointId}/containers/${encodeURIComponent(created.id)}`);
+          }}
+        />
       ) : null}
     </div>
   );
