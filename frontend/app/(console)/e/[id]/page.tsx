@@ -13,15 +13,15 @@ export default function DashboardPage() {
   const { current, ready } = useConsole();
   if (!ready) {
     return (
-      <PageFrame title="Dashboard" crumbs={[{ label: "Environment summary" }]} onRefresh={() => undefined}>
+      <PageFrame title="Dashboard" crumbs={[{ label: "Environment summary" }]}>
         <Loading noun="dashboard" />
       </PageFrame>
     );
   }
   if (!current) {
     return (
-      <PageFrame title="Dashboard" crumbs={[{ label: "Environment summary" }]} onRefresh={() => undefined}>
-        <ErrorState title="Endpoint was not found." message="It may have been removed." attempts={0} onRetry={() => undefined} />
+      <PageFrame title="Dashboard" crumbs={[{ label: "Environment summary" }]}>
+        <ErrorState title="Endpoint was not found." message="It may have been removed." attempts={0} />
       </PageFrame>
     );
   }

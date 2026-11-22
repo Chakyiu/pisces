@@ -21,6 +21,7 @@ export function Icon({ name }: { name: string }) {
     sidebar: <><rect x="2" y="3" width="12" height="10" rx="1" /><path d="M6 3v10" /></>,
     refresh: <><path d="M13.2 8a5.2 5.2 0 1 1-1.4-3.6" /><path d="M11.8 2.2v2.6H9.2" /></>,
     user: <><circle cx="8" cy="5.5" r="2" /><path d="M3.5 13.2c.8-2.2 2.4-3.3 4.5-3.3s3.7 1.1 4.5 3.3" /></>,
+    "sign-out": <><path d="M9.5 2.5H4.8A1.3 1.3 0 0 0 3.5 3.8v8.4a1.3 1.3 0 0 0 1.3 1.3h4.7" /><path d="M7.5 8h6" /><path d="M11 5.5 13.5 8 11 10.5" /></>,
     chevron: <path d="M4 6.5 8 10.5 12 6.5" />,
     logs: <><path d="M4 2.5h5.2L12.5 6v7.5H4Z" /><path d="M9.2 2.5V6H12.5" /><path d="M6 8.5h4M6 11h3" /></>,
     play: <path d="M5.5 3.5v9l7-4.5-7-4.5Z" />,
@@ -89,13 +90,13 @@ export function ErrorState({
   message: string;
   attempts: number;
   at?: Date;
-  onRetry: () => void;
+  onRetry?: () => void;
 }) {
   return (
     <div className="state" role="alert">
       <h2>{title}</h2>
       <p>{message}</p>
-      <button className="btn" onClick={onRetry}>Retry</button>
+      {onRetry ? <button className="btn" onClick={onRetry}>Retry</button> : null}
       {attempts > 0 && at ? (
         <p className="note">Last attempted: {clock(at)} · {attempts} {attempts === 1 ? "retry" : "retries"}</p>
       ) : null}

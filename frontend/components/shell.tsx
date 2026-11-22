@@ -180,7 +180,7 @@ export function Shell({ children }: { children: ReactNode }) {
               {menu ? (
                 <div className="menu" role="menu">
                   <div className="menu-user">{session.username}</div>
-                  <button type="button" onClick={() => void signOut()}>Sign out</button>
+                  <button type="button" onClick={() => void signOut()}><Icon name="sign-out" />Sign out</button>
                 </div>
               ) : null}
             </div>
@@ -202,7 +202,7 @@ export function PageFrame({
   title: string;
   crumbs: Crumb[];
   actions?: ReactNode;
-  onRefresh: () => void;
+  onRefresh?: () => void;
   children: ReactNode;
 }) {
   const { setCrumbs } = useConsole();
@@ -218,7 +218,7 @@ export function PageFrame({
         <h1>{title}</h1>
         <div className="title-actions">
           {actions}
-          <IconButton name="refresh" label="Refresh page" onClick={onRefresh} />
+          {onRefresh ? <IconButton name="refresh" label="Refresh page" onClick={onRefresh} /> : null}
         </div>
       </div>
       {children}
