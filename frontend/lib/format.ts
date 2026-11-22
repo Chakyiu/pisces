@@ -27,7 +27,8 @@ function trim(value: number): string {
 export function portList(ports: Port[]): string {
   if (ports.length === 0) return "—";
   return ports.map((port) => {
-    const host = port.host ? `${port.host} → ` : "";
+    const hostIp = port.hostIp ? `${port.hostIp}:` : "";
+    const host = port.host ? `${hostIp}${port.host} → ` : "";
     return `${host}${port.container}/${port.protocol}${port.host ? "" : " (exposed)"}`;
   }).join(", ");
 }

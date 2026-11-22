@@ -207,11 +207,13 @@ function Body({
           <Fact label="ID" value={detail.id} mono />
           <Fact label="Image" value={detail.image} mono />
           <Fact label="Command" value={blank(detail.command)} mono />
-          <Fact label="Restart" value={detail.restartPolicy || "no"} />
+          <Fact label="Entrypoint" value={blank(detail.entrypoint)} mono />
+          <Fact label="Restart" value={`${detail.restartPolicy || "no"}${detail.restartMaximumRetryCount == null ? "" : ` · ${detail.restartMaximumRetryCount} retries`}`} />
           <Fact label="Ports" value={portList(detail.ports)} mono />
           <Fact label="Mounts" value={mounts} />
           <Fact label="Networks" value={networks} />
-          <Fact label="Env" value={detail.envCount ? `${detail.envCount} hidden` : "None"} />
+          <MaskedEnvironment items={detail.env} />
+          <Fact label="Labels" value={detail.labels.length ? detail.labels.map(({ key, value }) => `${key} = ${value}`).join("\n") : "None"} mono />
           <Fact label="Image ID" value={detail.imageId} mono />
           <Fact label="Created" value={stamp(detail.created)} mono />
           <Fact label="Started" value={stamp(detail.started)} mono />
@@ -268,6 +270,26 @@ function Fact({ label, value, mono, title }: { label: string; value: string; mon
     <div className="fact">
       <span>{label}</span>
       <strong className={mono ? "mono" : undefined} title={title ?? value}>{value}</strong>
+    </div>
+  );
+}
+
+function MaskedEnvironment({ items }: { items: ContainerDetail["env"] }) {
+  const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+  return (
+    <div className="fact fact-multiline">
+      <span>Env</span>
+      <div className="env-list">
+        {items.length ? items.map(({ key, value }, index) => (
+          <div className="env-row" key={`${key}-${index}`}>
+            <code>{key}</code>
+            <code className="env-value">{revealed[index] ? value || "(empty)" : "••••••••"}</code>
+            <button className="btn" type="button" aria-label={`${revealed[index] ? "Hide" : "Reveal"} ${key}`} onClick={() => setRevealed((current) => ({ ...current, [index]: !current[index] }))}>
+              {revealed[index] ? "Hide" : "Reveal"}
+            </button>
+          </div>
+        )) : <strong>None</strong>}
+      </div>
     </div>
   );
 }

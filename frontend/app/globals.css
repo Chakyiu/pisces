@@ -501,6 +501,11 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle
   text-transform: uppercase;
 }
 .fact strong { font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.fact-multiline { align-items: start; }
+.env-list { display: grid; gap: 6px; min-width: 0; }
+.env-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto; gap: 8px; align-items: center; min-width: 0; }
+.env-row code { overflow-wrap: anywhere; }
+.env-row .btn { padding: 4px 8px; }
 
 .setting {
   display: grid;

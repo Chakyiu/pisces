@@ -13,6 +13,7 @@ export type Page<T> = {
 
 export type Port = {
   host: number | null;
+  hostIp?: string | null;
   container: number;
   protocol: string;
 };
@@ -56,11 +57,14 @@ export type ContainerDetail = {
   created: string;
   started: string | null;
   command: string;
+  entrypoint: string;
   restartPolicy: string;
+  restartMaximumRetryCount: number | null;
   ports: Port[];
   mounts: Mount[];
   networks: Attachment[];
-  envCount: number;
+  env: { key: string; value: string }[];
+  labels: { key: string; value: string }[];
 };
 
 export type LogLine = { timestamp: string; stream: string; text: string };

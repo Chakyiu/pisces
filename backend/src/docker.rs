@@ -124,6 +124,7 @@ pub fn object_ref(raw: &str) -> Result<&str, ApiError> {
 #[serde(rename_all = "camelCase")]
 pub struct PortOut {
     pub host: Option<u16>,
+    pub host_ip: Option<String>,
     pub container: u16,
     pub protocol: String,
 }
@@ -186,11 +187,28 @@ pub struct ContainerDetail {
     pub created: String,
     pub started: Option<String>,
     pub command: String,
+    pub entrypoint: String,
     pub restart_policy: String,
+    pub restart_maximum_retry_count: Option<i64>,
     pub ports: Vec<PortOut>,
     pub mounts: Vec<MountOut>,
     pub networks: Vec<NetworkAttachment>,
-    pub env_count: usize,
+    pub env: Vec<EnvOut>,
+    pub labels: Vec<LabelOut>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvOut {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelOut {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Serialize)]
@@ -1533,6 +1551,7 @@ fn container_out(summary: &ContainerSummary) -> ContainerOut {
                     .iter()
                     .map(|port| PortOut {
                         host: port.public_port,
+                        host_ip: port.ip.clone(),
                         container: port.private_port,
                         protocol: port
                             .typ
@@ -1659,14 +1678,44 @@ fn detail_out(
         created: inspected.created.unwrap_or_default(),
         started,
         command,
+        entrypoint: config
+            .and_then(|config| config.entrypoint.as_ref())
+            .map(|entrypoint| entrypoint.join(" "))
+            .unwrap_or_default(),
         restart_policy,
+        restart_maximum_retry_count: inspected
+            .host_config
+            .as_ref()
+            .and_then(|host| host.restart_policy.as_ref())
+            .and_then(|policy| policy.maximum_retry_count),
         ports,
         mounts,
         networks,
-        env_count: config
+        env: config
             .and_then(|config| config.env.as_ref())
-            .map(|env| env.len())
-            .unwrap_or(0),
+            .into_iter()
+            .flatten()
+            .map(|entry| {
+                let (key, value) = entry.split_once('=').unwrap_or((entry, ""));
+                EnvOut {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                }
+            })
+            .collect(),
+        labels: {
+            let mut labels: Vec<LabelOut> = config
+                .and_then(|config| config.labels.as_ref())
+                .into_iter()
+                .flatten()
+                .map(|(key, value)| LabelOut {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            labels.sort_by(|a, b| a.key.cmp(&b.key));
+            labels
+        },
     }
 }
 
@@ -1705,6 +1754,7 @@ fn ports_from_map(map: &HashMap<String, Option<Vec<PortBinding>>>) -> Vec<PortOu
                             .host_port
                             .as_ref()
                             .and_then(|port| port.parse().ok()),
+                        host_ip: binding.host_ip.clone(),
                         container,
                         protocol: protocol.to_string(),
                     });
@@ -1712,6 +1762,7 @@ fn ports_from_map(map: &HashMap<String, Option<Vec<PortBinding>>>) -> Vec<PortOu
             }
             _ => ports.push(PortOut {
                 host: None,
+                host_ip: None,
                 container,
                 protocol: protocol.to_string(),
             }),
