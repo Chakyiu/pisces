@@ -6,6 +6,7 @@ import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, shortId, stamp } from "../../../../../../lib/format";
 import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
+import { ContainerConsole } from "../../../../../../components/container-console";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
 
@@ -55,6 +56,7 @@ function Body({
   const [pending, setPending] = useState("");
   const [alert, setAlert] = useState("");
   const [confirm, setConfirm] = useState(false);
+  const [consoleOpen, setConsoleOpen] = useState(false);
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -144,12 +146,23 @@ function Body({
             <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
               <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
             </button>
+            <button className="btn" type="button" title="Open container console" aria-expanded={consoleOpen} aria-controls="container-console" disabled={Boolean(pending) || !isRunning} onClick={() => setConsoleOpen((open) => !open)}>
+              <Icon name="console" /> Console
+            </button>
             <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
               <Icon name="trash" /> Remove
             </button>
           </div>
         </div>
       </section>
+      {consoleOpen ? (
+        <ContainerConsole
+          endpointId={endpointId}
+          containerId={containerId}
+          running={isRunning}
+          onClose={() => setConsoleOpen(false)}
+        />
+      ) : null}
       <section className="widget">
         <h2>Status</h2>
         <div className="facts">

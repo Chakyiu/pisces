@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
 use bollard::container::LogOutput;
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerSummary, HostConfig, ImageSummary,
     Network, NetworkCreateRequest, PortBinding, VolumeCreateRequest,
@@ -336,6 +337,69 @@ pub async fn inspect_container(id: &str) -> Result<ContainerDetail, ApiError> {
     };
     let summary = list_summary(&docker, id).await.ok();
     Ok(detail_out(inspected, summary.as_ref()))
+}
+
+pub fn console_command(value: Option<&str>) -> Result<&'static str, ApiError> {
+    match value.unwrap_or("sh") {
+        "sh" => Ok("/bin/sh"),
+        "bash" => Ok("/bin/bash"),
+        "ash" => Ok("/bin/ash"),
+        _ => Err(ApiError::validation("Choose a supported shell.")),
+    }
+}
+
+pub fn console_user(value: Option<&str>) -> Result<Option<&'static str>, ApiError> {
+    match value.unwrap_or("default") {
+        "default" => Ok(None),
+        "root" => Ok(Some("0")),
+        _ => Err(ApiError::validation("Choose a supported user.")),
+    }
+}
+
+pub async fn create_console_exec(
+    container_id: &str,
+    command: &'static str,
+    user: Option<&'static str>,
+) -> Result<(Docker, String), ApiError> {
+    let docker = docker()?;
+    let exec = timed(docker.create_exec(
+        container_id,
+        CreateExecOptions::<String> {
+            cmd: Some(vec![command.to_string()]),
+            user: user.map(str::to_string),
+            attach_stdin: Some(true),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            tty: Some(true),
+            privileged: Some(false),
+            ..Default::default()
+        },
+    ))
+    .await?;
+    Ok((docker, exec.id))
+}
+
+pub async fn start_console_exec(
+    docker: &Docker,
+    exec_id: &str,
+) -> Result<StartExecResults, ApiError> {
+    timed(docker.start_exec(
+        exec_id,
+        Some(StartExecOptions {
+            detach: false,
+            tty: true,
+            output_capacity: None,
+        }),
+    ))
+    .await
+}
+
+pub async fn resize_console_exec(docker: &Docker, exec_id: &str, width: u16, height: u16) {
+    if !(1..=500).contains(&width) || !(1..=500).contains(&height) {
+        return;
+    }
+    let resize = docker.resize_exec(exec_id, ResizeExecOptions { width, height });
+    let _ = tokio::time::timeout(Duration::from_secs(2), resize).await;
 }
 
 pub async fn logs(id: &str, tail: usize) -> Result<Vec<LogLine>, ApiError> {
@@ -882,4 +946,24 @@ fn split_timestamp(line: &str) -> (String, String) {
         }
     }
     (String::new(), line.to_string())
+}
+
+#[cfg(test)]
+mod console_tests {
+    use super::*;
+
+    #[test]
+    fn console_shells_are_allowlisted() {
+        assert_eq!(console_command(None).ok(), Some("/bin/sh"));
+        assert_eq!(console_command(Some("bash")).ok(), Some("/bin/bash"));
+        assert_eq!(console_command(Some("ash")).ok(), Some("/bin/ash"));
+        assert!(console_command(Some("/bin/sh -c id")).is_err());
+    }
+
+    #[test]
+    fn console_users_are_allowlisted() {
+        assert_eq!(console_user(None).ok(), Some(None));
+        assert_eq!(console_user(Some("root")).ok(), Some(Some("0")));
+        assert!(console_user(Some("0;id")).is_err());
+    }
 }
