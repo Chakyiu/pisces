@@ -500,7 +500,7 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.fact strong { font-weight: 400; white-space: pre-wrap; }
+.fact strong { font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 
 .setting {
   display: grid;

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
-import { blank, portList, shortId, stamp } from "../../../../../../lib/format";
+import { blank, portList, stamp } from "../../../../../../lib/format";
 import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerConsole } from "../../../../../../components/container-console";
@@ -204,7 +204,7 @@ function Body({
       <section className="widget">
         <h2>Details</h2>
         <div className="facts">
-          <Fact label="ID" value={shortId(detail.id)} title={detail.id} mono />
+          <Fact label="ID" value={detail.id} mono />
           <Fact label="Image" value={detail.image} mono />
           <Fact label="Command" value={blank(detail.command)} mono />
           <Fact label="Restart" value={detail.restartPolicy || "no"} />
@@ -212,7 +212,9 @@ function Body({
           <Fact label="Mounts" value={mounts} />
           <Fact label="Networks" value={networks} />
           <Fact label="Env" value={detail.envCount ? `${detail.envCount} hidden` : "None"} />
+          <Fact label="Image ID" value={detail.imageId} mono />
           <Fact label="Created" value={stamp(detail.created)} mono />
+          <Fact label="Started" value={stamp(detail.started)} mono />
         </div>
       </section>
       {confirm ? (
