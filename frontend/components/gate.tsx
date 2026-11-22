@@ -17,7 +17,7 @@ export function DockerView({
   const { current, ready, reportDown } = useConsole();
   if (!ready) return <Loading noun={noun} />;
   if (!current) {
-    return <ErrorState title="Endpoint was not found." message="It may have been removed." attempts={0} onRetry={() => undefined} />;
+    return <ErrorState title="Endpoint was not found." message="It may have been removed." attempts={0} />;
   }
   if (current.kind !== "docker") {
     return (
