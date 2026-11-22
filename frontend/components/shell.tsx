@@ -332,17 +332,15 @@ function EnvBlock({ current, collapsed }: { current?: Endpoint; collapsed: boole
         <Icon name={current.kind === "kubernetes" ? "kubernetes" : "docker"} />
       </span>
       {collapsed ? null : <span className="env-name" title={current.name}>{current.name}</span>}
-      {collapsed ? null : (
-        <button
-          className="icon-btn"
-          type="button"
-          aria-label="Clear environment"
-          title="Clear environment"
-          onClick={() => router.push("/home")}
-        >
-          <Icon name="clear" />
-        </button>
-      )}
+      <button
+        className="icon-btn"
+        type="button"
+        aria-label="Clear environment"
+        title="Clear environment"
+        onClick={() => router.push("/home")}
+      >
+        <Icon name="clear" />
+      </button>
     </div>
   );
 }
