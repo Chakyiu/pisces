@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
@@ -140,6 +141,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/endpoints/{id}/containers/{container_id}/logs",
             get(container_logs),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/logs/stream",
+            get(container_logs_stream),
         )
         .route(
             "/api/endpoints/{id}/containers/{container_id}/console",
@@ -410,6 +415,38 @@ async fn container_logs(
         .unwrap_or(200);
     let lines = docker::logs(container_id, tail).await?;
     Ok(Json(serde_json::json!({ "lines": lines })))
+}
+
+/// NDJSON follow stream. Deliberately not under any collection timeout, and the
+/// Next proxy exempts it from its 10 s abort (`frontend/app/api/[...path]/route.ts`).
+async fn container_logs_stream(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+    Query(query): Query<ListQuery>,
+) -> Result<Response, ApiError> {
+    require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?;
+    let tail = query
+        .tail
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<usize>()
+        .unwrap_or(0);
+    let lines = docker::follow_logs(container_id, tail)?;
+    let body = Body::from_stream(lines.map(|item| {
+        Ok::<_, std::io::Error>(format!(
+            "{}
+",
+            docker::encode_event(item)
+        ))
+    }));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .map_err(|_| ApiError::daemon("The log stream could not be opened."))
 }
 
 async fn container_console(
