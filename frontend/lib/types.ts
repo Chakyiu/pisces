@@ -27,6 +27,21 @@ export type Container = {
   created: number;
 };
 
+export type StackContainer = {
+  id: string;
+  name: string;
+  service?: string | null;
+  state: string;
+};
+
+export type Stack = {
+  project: string;
+  running: number;
+  total: number;
+  state: string;
+  containers: StackContainer[];
+};
+
 export type Mount = { source: string; destination: string; mode: string };
 
 export type Attachment = { name: string; ip: string };
