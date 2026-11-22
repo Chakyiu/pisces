@@ -1,6 +1,12 @@
 import { NextRequest } from "next/server";
+import { Agent } from "undici";
 
 export const dynamic = "force-dynamic";
+
+// Node's fetch kills a response body after 5 minutes of silence, and a followed
+// container is often quieter than that. Following gets its own dispatcher with
+// both timeouts off; req.signal still ends it when the browser lets go.
+const followDispatcher = new Agent({ bodyTimeout: 0, headersTimeout: 0 });
 
 const API_DOWN = {
   error: {
@@ -35,6 +41,7 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
     // off, navigation away) the Rust side must see the connection close too,
     // instead of following a container nobody is watching.
     init.signal = req.signal;
+    (init as RequestInit & { dispatcher: Agent }).dispatcher = followDispatcher;
   } else {
     init.signal = AbortSignal.timeout(10_000);
   }
