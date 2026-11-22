@@ -40,7 +40,9 @@ One Linux image runs the UI and the API. Publish port 3000, mount the engine soc
 docker run -d --name pisces --restart unless-stopped -p 3000:3000 -v /var/run/docker.sock:/var/run/docker.sock -v pisces-data:/data -e PISCES_USERNAME=admin -e PISCES_PASSWORD=choose-a-password ghcr.io/chakyiu/pisces:latest
 ```
 
-Open `http://localhost:3000` and sign in with those values. The API inside the image listens only on `127.0.0.1:8787`; the UI proxies `/api`. The process runs as root so it can use the socket. Endpoint names are stored in the `pisces-data` volume, and the first start writes a session signing key there so restarts keep sessions. `PISCES_PASSWORD` stays on the container and shows up in `docker inspect`.
+Open `http://localhost:3000` and sign in with those values. The API inside the image listens only on `127.0.0.1:8787`; the UI proxies `/api`. The process runs as root so it can use the socket. Endpoint names are stored in the `pisces-data` volume, and the first start writes a session signing key there so restarts keep sessions.
+
+The backend accepts either form of the password. `PISCES_PASSWORD_HASH` (an argon2 PHC string) wins when set; otherwise the backend hashes `PISCES_PASSWORD` once at startup and keeps only the hash in memory. The plaintext still stays on the container, so it shows up in `docker inspect` — pass `-e PISCES_PASSWORD_HASH=...` instead if that matters.
 
 `docker build -t pisces .` from this repo builds the same image. Use `pisces` in the command above instead of `ghcr.io/chakyiu/pisces:latest`.
 
@@ -62,12 +64,17 @@ frontend/   Next.js App Router app (TypeScript)
 
 ## Dev loop (Windows, two terminals)
 
-Backend, from `backend/` — listens on `http://127.0.0.1:8787`. Set the three variables
+Backend, from `backend/` — listens on `http://127.0.0.1:8787`. Set the variables
 in the shell before `cargo run`. Do not commit them.
 
 - `PISCES_USERNAME` — the single operator name
-- `PISCES_PASSWORD_HASH` — argon2 PHC string from `cargo run -- hash-password` (password on stdin)
+- `PISCES_PASSWORD` — plain password; hashed once at startup, then only the hash is kept
+- `PISCES_PASSWORD_HASH` — argon2 PHC string from `cargo run -- hash-password` (password on stdin); wins over `PISCES_PASSWORD` when set
 - `PISCES_JWT_SECRET` — 32 or more characters, used only to sign the session cookie
+
+Set at least one of them: neither password variable is a startup error. A value that is
+not a PHC string in `PISCES_PASSWORD_HASH` is rejected at startup. The startup line
+reports which variable was used; the plaintext is never logged.
 
 ```powershell
 cargo run -- hash-password
