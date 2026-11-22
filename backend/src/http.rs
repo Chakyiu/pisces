@@ -3,13 +3,17 @@
 use std::sync::{Arc, Mutex};
 
 use axum::extract::rejection::JsonRejection;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 use crate::auth::{self, AuthConfig};
 use crate::docker;
@@ -104,6 +108,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/session", post(login).get(session).delete(logout))
+        .route("/api/prototype/exec/{container_id}", get(prototype_exec))
         .route("/api/kubernetes/contexts", get(contexts))
         .route("/api/endpoints", get(list_endpoints).post(create_endpoint))
         .route(
@@ -162,6 +167,119 @@ pub fn router(state: AppState) -> Router {
         ))
         .layer(axum::middleware::from_fn(no_store))
         .with_state(state)
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PrototypeExecMessage {
+    Input { data: String },
+    Resize { width: u16, height: u16 },
+}
+
+fn prototype_same_origin(headers: &HeaderMap) -> bool {
+    let origin = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uri>().ok());
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    origin.as_ref().is_some_and(|origin| {
+        matches!(origin.scheme_str(), Some("http" | "https"))
+            && origin
+                .path_and_query()
+                .is_none_or(|path| path.as_str() == "/")
+            && origin.authority().is_some_and(|authority| {
+                host.is_some_and(|host| authority.as_str().eq_ignore_ascii_case(host))
+            })
+    })
+}
+
+async fn prototype_exec(
+    headers: HeaderMap,
+    Path(container_id): Path<String>,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    if !prototype_same_origin(&headers) {
+        return Err(ApiError::unauthorized(
+            "Cross-origin WebSocket request rejected.",
+        ));
+    }
+
+    let docker = docker::client().map_err(|error| ApiError::daemon(error.to_string()))?;
+    let exec = docker
+        .create_exec(
+            &container_id,
+            CreateExecOptions::<String> {
+                cmd: Some(vec!["/bin/sh".into()]),
+                attach_stdin: Some(true),
+                attach_stdout: Some(true),
+                attach_stderr: Some(true),
+                tty: Some(true),
+                privileged: Some(false),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| ApiError::validation(error.to_string()))?;
+    Ok(ws.on_upgrade(move |socket| prototype_exec_socket(socket, docker, exec.id)))
+}
+
+async fn prototype_exec_socket(mut socket: WebSocket, docker: bollard::Docker, exec_id: String) {
+    let result = docker
+        .start_exec(
+            &exec_id,
+            Some(StartExecOptions {
+                detach: false,
+                tty: true,
+                output_capacity: None,
+            }),
+        )
+        .await;
+    let (mut output, mut input) = match result {
+        Ok(StartExecResults::Attached { output, input }) => (output, input),
+        Ok(StartExecResults::Detached) => return,
+        Err(error) => {
+            let _ = socket.send(Message::Text(error.to_string().into())).await;
+            return;
+        }
+    };
+
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(message) = serde_json::from_str::<PrototypeExecMessage>(&text) {
+                        match message {
+                            PrototypeExecMessage::Input { data } => {
+                                if input.write_all(data.as_bytes()).await.is_err() { break; }
+                                let _ = input.flush().await;
+                            }
+                            PrototypeExecMessage::Resize { width, height } if (1..=500).contains(&width) && (1..=500).contains(&height) => {
+                                let _ = docker.resize_exec(&exec_id, ResizeExecOptions { width, height }).await;
+                            }
+                            PrototypeExecMessage::Resize { .. } => {}
+                        }
+                    }
+                }
+                Some(Ok(Message::Binary(data))) => {
+                    if input.write_all(&data).await.is_err() { break; }
+                    let _ = input.flush().await;
+                }
+                Some(Ok(Message::Ping(data))) => {
+                    if socket.send(Message::Pong(data)).await.is_err() { break; }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                _ => {}
+            },
+            outgoing = output.next() => match outgoing {
+                Some(Ok(line)) => {
+                    if socket.send(Message::Binary(line.into_bytes())).await.is_err() { break; }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+    }
 }
 
 async fn no_store(req: Request, next: Next) -> Response {
@@ -578,5 +696,32 @@ fn endpoint_out(endpoint: Endpoint, docker_up: bool) -> EndpointOut {
         name: endpoint.name,
         kind: endpoint.kind,
         status: status.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod prototype_tests {
+    use super::*;
+
+    #[test]
+    fn websocket_requires_matching_origin_and_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("pisces.example:3000"),
+        );
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://pisces.example:3000"),
+        );
+        assert!(prototype_same_origin(&headers));
+
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://attacker.example"),
+        );
+        assert!(!prototype_same_origin(&headers));
+        headers.remove(header::ORIGIN);
+        assert!(!prototype_same_origin(&headers));
     }
 }

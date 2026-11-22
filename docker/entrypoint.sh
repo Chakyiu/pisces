@@ -17,7 +17,7 @@ if [[ -z "${PISCES_JWT_SECRET:-}" ]]; then
   export PISCES_JWT_SECRET
 fi
 
-export HOSTNAME=0.0.0.0
+export HOSTNAME=127.0.0.1
 export PORT="${PORT:-3000}"
 export PISCES_BIND="${PISCES_BIND:-127.0.0.1:8787}"
 export PISCES_DATA_DIR="${PISCES_DATA_DIR:-/data}"
@@ -25,17 +25,19 @@ export PISCES_API_URL="${PISCES_API_URL:-http://127.0.0.1:8787}"
 
 /usr/local/bin/pisces &
 api_pid=$!
-node /app/server.js &
+HOSTNAME=127.0.0.1 PORT=3001 node /app/server.js &
 web_pid=$!
+node /usr/local/bin/ws-bridge.mjs &
+proxy_pid=$!
 
 shutdown() {
-  kill "$api_pid" "$web_pid" 2>/dev/null || true
-  wait "$api_pid" "$web_pid" 2>/dev/null || true
+  kill "$api_pid" "$web_pid" "$proxy_pid" 2>/dev/null || true
+  wait "$api_pid" "$web_pid" "$proxy_pid" 2>/dev/null || true
 }
 trap shutdown INT TERM
 
 set +e
-wait -n "$api_pid" "$web_pid"
+wait -n "$api_pid" "$web_pid" "$proxy_pid"
 status=$?
 set -e
 shutdown

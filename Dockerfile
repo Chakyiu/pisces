@@ -29,6 +29,7 @@ COPY --from=backend /src/target/release/pisces-backend /usr/local/bin/pisces
 COPY --from=frontend /src/.next/standalone /app
 COPY --from=frontend /src/.next/static /app/.next/static
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY docker/ws-bridge.mjs /usr/local/bin/ws-bridge.mjs
 RUN chmod +x /usr/local/bin/entrypoint.sh
 WORKDIR /app
 VOLUME /data
