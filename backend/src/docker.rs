@@ -11,8 +11,8 @@ use bollard::container::LogOutput;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
     ContainerCreateBody, ContainerInspectResponse, ContainerSummary, ContainerUpdateBody,
-    EndpointSettings, HostConfig, ImageSummary, Network, NetworkCreateRequest, NetworkingConfig,
-    PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
+    EndpointSettings, HostConfig, ImageSummary, Mount, MountType, Network, NetworkCreateRequest,
+    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, InspectContainerOptions, ListContainersOptions,
@@ -22,7 +22,7 @@ use bollard::query_parameters::{
 };
 use bollard::Docker;
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
 
@@ -84,7 +84,7 @@ fn map_err(err: bollard::errors::Error) -> ApiError {
             match status_code {
                 404 => ApiError::not_found(message),
                 409 => ApiError::in_use(message),
-                400 => ApiError::validation(message),
+                400 => ApiError::unsafe_validation(message),
                 _ => ApiError::daemon(message),
             }
         }
@@ -197,14 +197,14 @@ pub struct ContainerDetail {
     pub labels: Vec<LabelOut>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvOut {
     pub key: String,
     pub value: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LabelOut {
     pub key: String,
@@ -647,8 +647,7 @@ pub async fn restart_container(id: &str) -> Result<(), ApiError> {
 
 pub async fn remove_container(id: &str) -> Result<(), ApiError> {
     let docker = docker()?;
-    let options = RemoveContainerOptionsBuilder::new().force(true).build();
-    timed(docker.remove_container(id, Some(options))).await
+    remove_container_with(&docker, id).await
 }
 
 pub async fn run_container(request: RunRequest) -> Result<CreatedContainer, ApiError> {
@@ -725,11 +724,24 @@ pub async fn run_container(request: RunRequest) -> Result<CreatedContainer, ApiE
 // config. The client never sends a whole container spec it could tamper with.
 
 /// Fields the edit dialog lets the user change. `None` means "carry over".
+#[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MountEdit {
+    pub source: String,
+    pub destination: String,
+    pub mount_type: String,
+    pub read_only: bool,
+}
+
 #[derive(Default)]
 pub struct ContainerEdits {
     pub image: Option<String>,
-    pub env: Option<Vec<String>>,
+    pub command: Option<Vec<String>>,
+    pub entrypoint: Option<Vec<String>>,
+    pub env: Option<Vec<EnvOut>>,
+    pub labels: Option<Vec<LabelOut>>,
     pub ports: Option<Vec<String>>,
+    pub mounts: Option<Vec<MountEdit>>,
     pub restart: Option<String>,
 }
 
@@ -738,11 +750,14 @@ pub struct ContainerEdits {
 pub struct ContainerConfigOut {
     pub name: String,
     pub image: String,
-    pub env: Vec<String>,
+    pub command: Vec<String>,
+    pub entrypoint: Vec<String>,
+    pub env: Vec<EnvOut>,
+    pub labels: Vec<LabelOut>,
     pub ports: Vec<String>,
     pub restart_policy: String,
     pub networks: Vec<String>,
-    pub mounts: Vec<String>,
+    pub mounts: Vec<MountEdit>,
 }
 
 fn inspected_name(inspected: &ContainerInspectResponse) -> String {
@@ -784,9 +799,9 @@ fn parse_port_line(line: &str) -> Result<RunPort, ApiError> {
         Some((mapping, "udp")) => (mapping, "udp".to_string()),
         Some((mapping, "sctp")) => (mapping, "sctp".to_string()),
         Some((_, _)) => {
-            return Err(ApiError::validation(format!(
-                "{line}: protocol must be tcp, udp or sctp."
-            )));
+            return Err(ApiError::validation(
+                "Port mapping protocol must be tcp, udp or sctp.",
+            ));
         }
         None => (line, "tcp".to_string()),
     };
@@ -800,18 +815,58 @@ fn parse_port_line(line: &str) -> Result<RunPort, ApiError> {
             container,
             protocol,
         }),
-        _ => Err(ApiError::validation(format!(
-            "{line}: use host:container, a single port, and an optional /tcp /udp /sctp."
-        ))),
+        _ => Err(ApiError::validation(
+            "Port mapping must use host:container and an optional /tcp, /udp or /sctp.",
+        )),
     }
 }
 
-fn parse_env_lines(lines: &[String]) -> Vec<String> {
-    lines
+fn special_port_line(line: &str, prefix: &str) -> Result<Option<String>, ApiError> {
+    let Some(value) = line.trim().strip_prefix(prefix) else {
+        return Ok(None);
+    };
+    let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
+    let port = port.parse::<u16>().ok().filter(|port| *port > 0);
+    if port.is_none() || !matches!(protocol, "tcp" | "udp" | "sctp") {
+        return Err(ApiError::validation("Port mapping is invalid."));
+    }
+    Ok(Some(format!("{}/{protocol}", port.unwrap())))
+}
+
+fn bind_target(spec: &str) -> Option<&str> {
+    let mut parts = spec.rsplit(':');
+    let last = parts.next()?;
+    let is_mode = last.contains(',')
+        || matches!(
+            last,
+            "ro" | "rw"
+                | "private"
+                | "rprivate"
+                | "shared"
+                | "rshared"
+                | "slave"
+                | "rslave"
+                | "z"
+                | "Z"
+        );
+    if is_mode {
+        parts.next()
+    } else {
+        Some(last)
+    }
+}
+
+fn environment_lines(entries: &[EnvOut]) -> Result<Vec<String>, ApiError> {
+    entries
         .iter()
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
-        .map(|line| line.to_string())
+        .map(|entry| {
+            if entry.key.is_empty() || entry.key.contains('=') || entry.key.contains('\n') || entry.key.contains('\r') {
+                return Err(ApiError::validation(
+                    "Environment variable names must be non-empty and cannot contain '=', or newlines.",
+                ));
+            }
+            Ok(format!("{}={}", entry.key, entry.value))
+        })
         .collect()
 }
 
@@ -884,12 +939,38 @@ fn build_container_body(
             if line.trim().is_empty() {
                 continue;
             }
+            if let Some(key) = special_port_line(line, "expose:")? {
+                keys.push(key);
+                continue;
+            }
+            if let Some(key) = special_port_line(line, "auto:")? {
+                keys.push(key.clone());
+                bindings.entry(key).or_default().push(PortBinding {
+                    host_ip: None,
+                    host_port: None,
+                });
+                continue;
+            }
             let port = parse_port_line(line)?;
             let key = format!("{}/{}", port.container, port.protocol);
+            let host_port = port.host.to_string();
+            let host_ip = inspected
+                .host_config
+                .as_ref()
+                .and_then(|host| host.port_bindings.as_ref())
+                .and_then(|original| original.get(&key))
+                .and_then(|bindings| bindings.as_ref())
+                .and_then(|original| {
+                    original
+                        .iter()
+                        .find(|binding| binding.host_port.as_deref() == Some(&host_port))
+                })
+                .and_then(|binding| binding.host_ip.clone())
+                .or_else(|| Some("0.0.0.0".into()));
             keys.push(key.clone());
             bindings.entry(key).or_default().push(PortBinding {
-                host_ip: Some("0.0.0.0".into()),
-                host_port: Some(port.host.to_string()),
+                host_ip,
+                host_port: Some(host_port),
             });
         }
         host.port_bindings = if bindings.is_empty() {
@@ -905,38 +986,119 @@ fn build_container_body(
         exposed = if keys.is_empty() { None } else { Some(keys) };
     }
 
-    // Some daemons (containerd-snapshotter Docker Desktop) leave HostConfig.Binds
-    // null even for containers started with -v vol:/data, reporting the real
-    // mounts only in inspect .Mounts. Rebuild bind specs from there so named
-    // volumes and bind mounts survive duplicate/recreate. Anonymous volumes
-    // (64-hex engine-minted names) are skipped on purpose: the new container
-    // gets fresh ones, as in Portainer.
-    if let Some(mounts) = &inspected.mounts {
-        let mut binds: Vec<String> = host.binds.clone().unwrap_or_default();
-        let taken: Vec<String> = binds
-            .iter()
-            .filter_map(|spec| spec.split(':').nth(1).map(str::to_string))
-            .collect();
+    // Some daemons report mounts in .Mounts but omit them from HostConfig.
+    // Preserve exact existing bind/mount options where possible and reuse
+    // anonymous volume names so their data survives replacement.
+    if let Some(mounts) = &edits.mounts {
+        let original_host = inspected.host_config.as_ref();
+        let original_mounts = inspected.mounts.as_deref().unwrap_or_default();
+        let mut binds = Vec::new();
+        let mut configured = Vec::with_capacity(mounts.len());
+        let mut tmpfs = HashMap::new();
         for mount in mounts {
-            let source = match mount.typ.as_deref() {
-                Some("volume") => mount.name.clone().unwrap_or_default(),
-                Some("bind") => mount.source.clone().unwrap_or_default(),
-                _ => continue,
+            if mount.destination.is_empty() || !mount.destination.starts_with('/') {
+                return Err(ApiError::validation(
+                    "Each mount needs an absolute container destination.",
+                ));
+            }
+            let typ = match mount.mount_type.as_str() {
+                "bind" if !mount.source.is_empty() => MountType::BIND,
+                "volume" if !mount.source.is_empty() => MountType::VOLUME,
+                "tmpfs" if mount.source.is_empty() => MountType::TMPFS,
+                _ => return Err(ApiError::validation("Mount type or source is invalid.")),
             };
-            let target = mount.destination.clone().unwrap_or_default();
-            let anonymous = source.len() == 64 && source.chars().all(|c| c.is_ascii_hexdigit());
-            if source.is_empty()
-                || target.is_empty()
-                || anonymous
-                || taken.iter().any(|t| t == &target)
-            {
+            let same_inspect_mount = original_mounts.iter().any(|original| {
+                let source = if original.typ.as_deref() == Some("volume") {
+                    original.name.as_deref().or(original.source.as_deref())
+                } else {
+                    original.source.as_deref()
+                }
+                .unwrap_or_default();
+                original.destination.as_deref() == Some(mount.destination.as_str())
+                    && source == mount.source
+                    && original.typ.as_deref() == Some(mount.mount_type.as_str())
+                    && (original.rw != Some(false)) == !mount.read_only
+            });
+            let unchanged = original_host
+                .and_then(|host| host.mounts.as_ref())
+                .and_then(|original| {
+                    original.iter().find(|original| {
+                        original.target.as_deref() == Some(mount.destination.as_str())
+                            && original.source.as_deref().unwrap_or("") == mount.source
+                            && original.typ == Some(typ)
+                            && original.read_only.unwrap_or(false) == mount.read_only
+                    })
+                })
+                .cloned();
+            if typ == MountType::TMPFS {
+                if let Some(original) = unchanged {
+                    configured.push(original);
+                } else {
+                    let original_options = original_host
+                        .and_then(|host| host.tmpfs.as_ref())
+                        .and_then(|options| options.get(&mount.destination))
+                        .filter(|_| same_inspect_mount)
+                        .cloned();
+                    tmpfs.insert(
+                        mount.destination.clone(),
+                        original_options.unwrap_or_else(|| {
+                            if mount.read_only {
+                                "ro".into()
+                            } else {
+                                String::new()
+                            }
+                        }),
+                    );
+                }
                 continue;
             }
-            let ro = if mount.rw == Some(false) { ":ro" } else { "" };
-            binds.push(format!("{source}:{target}{ro}"));
+            if same_inspect_mount {
+                if let Some(spec) =
+                    original_host
+                        .and_then(|host| host.binds.as_ref())
+                        .and_then(|specs| {
+                            specs
+                                .iter()
+                                .find(|spec| bind_target(spec) == Some(mount.destination.as_str()))
+                        })
+                {
+                    binds.push(spec.clone());
+                    continue;
+                }
+            }
+            configured.push(unchanged.unwrap_or_else(|| Mount {
+                target: Some(mount.destination.clone()),
+                source: (!mount.source.is_empty()).then(|| mount.source.clone()),
+                typ: Some(typ),
+                read_only: Some(mount.read_only),
+                ..Default::default()
+            }));
         }
-        if !binds.is_empty() {
-            host.binds = Some(binds);
+        host.binds = (!binds.is_empty()).then_some(binds);
+        host.mounts = (!configured.is_empty()).then_some(configured);
+        host.tmpfs = (!tmpfs.is_empty()).then_some(tmpfs);
+    } else if host.binds.as_ref().is_none_or(Vec::is_empty)
+        && host.mounts.as_ref().is_none_or(Vec::is_empty)
+    {
+        if let Some(mounts) = &inspected.mounts {
+            let mut binds = Vec::new();
+            for mount in mounts {
+                let source = match mount.typ.as_deref() {
+                    Some("volume") => mount.name.clone().or_else(|| mount.source.clone()),
+                    Some("bind") => mount.source.clone(),
+                    _ => continue,
+                }
+                .unwrap_or_default();
+                let target = mount.destination.clone().unwrap_or_default();
+                if source.is_empty() || target.is_empty() {
+                    continue;
+                }
+                let ro = if mount.rw == Some(false) { ":ro" } else { "" };
+                binds.push(format!("{source}:{target}{ro}"));
+            }
+            if !binds.is_empty() {
+                host.binds = Some(binds);
+            }
         }
     }
 
@@ -951,22 +1113,35 @@ fn build_container_body(
         tty: config.tty,
         open_stdin: config.open_stdin,
         stdin_once: config.stdin_once,
-        env: Some(parse_env_lines(
-            edits
-                .env
-                .as_deref()
-                .unwrap_or(config.env.as_deref().unwrap_or(&[])),
-        )),
-        cmd: config.cmd,
+        env: Some(match edits.env.as_deref() {
+            Some(entries) => environment_lines(entries)?,
+            None => config.env.unwrap_or_default(),
+        }),
+        cmd: edits.command.clone().or(config.cmd),
+        entrypoint: edits.entrypoint.clone().or(config.entrypoint),
         healthcheck: config.healthcheck,
         args_escaped: config.args_escaped,
         image: Some(image),
         volumes: config.volumes,
         working_dir: config.working_dir,
-        entrypoint: config.entrypoint,
         network_disabled: config.network_disabled,
         on_build: config.on_build,
-        labels: config.labels,
+        labels: Some(match &edits.labels {
+            Some(entries) => {
+                let mut labels = HashMap::new();
+                for entry in entries {
+                    if entry.key.is_empty() || entry.key.contains('\n') || entry.key.contains('\r')
+                    {
+                        return Err(ApiError::validation(
+                            "Label names must be non-empty and cannot contain newlines.",
+                        ));
+                    }
+                    labels.insert(entry.key.clone(), entry.value.clone());
+                }
+                labels
+            }
+            None => config.labels.unwrap_or_default(),
+        }),
         stop_signal: config.stop_signal,
         stop_timeout: config.stop_timeout,
         shell: config.shell,
@@ -1060,10 +1235,9 @@ pub async fn duplicate_or_replace(
     }
 }
 
-/// Replace a container in place, Portainer's Recreate: rename the original out
-/// of the way, build a new container with the (optionally edited) config under
-/// the original name, stop the original, start the replacement, then remove it.
-/// Any failure partway rolls the original back instead of leaving nothing.
+/// Replace a container in place: stop the original to release published ports,
+/// rename it aside, start a replacement with its config under the original name,
+/// then remove the backup. Failures attempt to restore the original.
 pub async fn recreate_container(
     source: &str,
     edits: Option<&ContainerEdits>,
@@ -1073,7 +1247,7 @@ pub async fn recreate_container(
     let id = inspected
         .id
         .clone()
-        .ok_or_else(|| ApiError::not_found(format!("{source} was not found.")))?;
+        .ok_or_else(|| ApiError::not_found("The original container was not found."))?;
     let name = inspected_name(&inspected);
     if name.is_empty() {
         return Err(ApiError::validation(
@@ -1093,23 +1267,16 @@ pub async fn recreate_container(
         .and_then(|config| config.stop_timeout)
         .unwrap_or(10)
         .clamp(1, 15) as u64;
-    let backup = format!("pisces-recreate-{}", short_id(&id));
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let backup = format!("pisces-recreate-{}-{unique}", short_id(&id));
 
-    // Rename first so the original name frees up while the original itself
-    // stays intact until the replacement is confirmed running.
-    let rename = RenameContainerOptionsBuilder::new().name(&backup).build();
-    timed(docker.rename_container(&id, rename)).await?;
-
-    let options = CreateContainerOptionsBuilder::new().name(&name).build();
-    let created = match timed(docker.create_container(Some(options), body)).await {
-        Ok(created) => created,
-        Err(err) => {
-            rollback(&docker, &id, &name, was_running).await;
-            return Err(err);
-        }
-    };
+    // Release published ports before creating the replacement, but keep the old
+    // container available under a temporary name until the new one is healthy.
     if was_running {
-        let stop = timed_for(
+        if timed_for(
             std::time::Duration::from_secs(stop_grace + 5),
             docker.stop_container(
                 &id,
@@ -1119,35 +1286,138 @@ pub async fn recreate_container(
                 }),
             ),
         )
-        .await;
-        if let Err(err) = stop {
-            let _ = docker.remove_container(&created.id, None).await;
-            rollback(&docker, &id, &name, was_running).await;
-            return Err(err);
+        .await
+        .is_err()
+        {
+            if ensure_container_running(&docker, &id).await.is_err() {
+                return Err(recreate_recovery_error());
+            }
+            return Err(ApiError::daemon(
+                "Recreate failed; the original container remains in place.",
+            ));
         }
     }
-    if let Err(err) = timed(docker.start_container(&created.id, None)).await {
-        let _ = docker.remove_container(&created.id, None).await;
-        rollback(&docker, &id, &name, was_running).await;
-        return Err(err);
+    let rename = RenameContainerOptionsBuilder::new().name(&backup).build();
+    if timed(docker.rename_container(&id, rename)).await.is_err() {
+        if was_running && ensure_container_running(&docker, &id).await.is_err() {
+            return Err(recreate_recovery_error());
+        }
+        return Err(ApiError::conflict(
+            "The original container could not be moved aside.",
+        ));
     }
-    // The id survives the rename, so removing by id cannot hit the wrong container.
-    let cleanup = RemoveContainerOptionsBuilder::new().force(true).build();
-    let _ = timed(docker.remove_container(&id, Some(cleanup))).await;
+
+    let options = CreateContainerOptionsBuilder::new().name(&name).build();
+    let created = match timed(docker.create_container(Some(options), body)).await {
+        Ok(created) => created,
+        Err(_) => {
+            if restore_original(&docker, &id, &name, was_running)
+                .await
+                .is_err()
+            {
+                return Err(recreate_recovery_error());
+            }
+            return Err(ApiError::daemon(
+                "Recreate failed; the original container was restored.",
+            ));
+        }
+    };
+
+    if timed(docker.start_container(&created.id, None))
+        .await
+        .is_err()
+    {
+        if remove_container_with(&docker, &created.id).await.is_err() {
+            let failed_name = format!("pisces-failed-{}-{unique}", short_id(&created.id));
+            let rename = RenameContainerOptionsBuilder::new()
+                .name(&failed_name)
+                .build();
+            if timed(docker.rename_container(&created.id, rename))
+                .await
+                .is_err()
+            {
+                return Err(recreate_recovery_error());
+            }
+        }
+        if restore_original(&docker, &id, &name, was_running)
+            .await
+            .is_err()
+        {
+            return Err(recreate_recovery_error());
+        }
+        return Err(ApiError::daemon(
+            "Recreate failed; the original container was restored.",
+        ));
+    }
+
+    if remove_container_with(&docker, &id).await.is_err() {
+        let stopped = timed_for(
+            std::time::Duration::from_secs(stop_grace + 5),
+            docker.stop_container(
+                &created.id,
+                Some(StopContainerOptions {
+                    t: Some(stop_grace as i32),
+                    ..Default::default()
+                }),
+            ),
+        )
+        .await;
+        if stopped.is_err() || remove_container_with(&docker, &created.id).await.is_err() {
+            return Err(recreate_recovery_error());
+        }
+        if restore_original(&docker, &id, &name, was_running)
+            .await
+            .is_err()
+        {
+            return Err(recreate_recovery_error());
+        }
+        return Err(ApiError::daemon(
+            "Recreate failed; the original container was restored.",
+        ));
+    }
     Ok(CreatedContainer {
         id: created.id,
         name,
     })
 }
 
-async fn rollback(docker: &Docker, id: &str, original_name: &str, restart: bool) {
+async fn remove_container_with(docker: &Docker, id: &str) -> Result<(), ApiError> {
+    let options = RemoveContainerOptionsBuilder::new().force(true).build();
+    timed(docker.remove_container(id, Some(options))).await
+}
+
+async fn ensure_container_running(docker: &Docker, id: &str) -> Result<(), ApiError> {
+    let inspected = inspect_raw(docker, id).await?;
+    let running = inspected
+        .state
+        .as_ref()
+        .and_then(|state| state.status.as_ref())
+        .map(ToString::to_string)
+        .is_some_and(|status| matches!(status.as_str(), "running" | "restarting"));
+    if !running {
+        timed(docker.start_container(id, None)).await?;
+    }
+    Ok(())
+}
+
+async fn restore_original(
+    docker: &Docker,
+    id: &str,
+    original_name: &str,
+    restart: bool,
+) -> Result<(), ApiError> {
     let rename = RenameContainerOptionsBuilder::new()
         .name(original_name)
         .build();
-    let _ = docker.rename_container(id, rename).await;
+    timed(docker.rename_container(id, rename)).await?;
     if restart {
-        let _ = docker.start_container(id, None).await;
+        ensure_container_running(docker, id).await?;
     }
+    Ok(())
+}
+
+fn recreate_recovery_error() -> ApiError {
+    ApiError::daemon("Recreate recovery incomplete: inspect container state before retrying.")
 }
 
 pub async fn container_config(id: &str) -> Result<ContainerConfigOut, ApiError> {
@@ -1155,22 +1425,26 @@ pub async fn container_config(id: &str) -> Result<ContainerConfigOut, ApiError> 
     let inspected = inspect_raw(&docker, id).await?;
     let config = inspected.config.clone().unwrap_or_default();
     let host = inspected.host_config.clone().unwrap_or_default();
-    let mut ports: Vec<String> = host
-        .port_bindings
-        .unwrap_or_default()
+    let port_bindings = host.port_bindings.unwrap_or_default();
+    let bound_keys: Vec<String> = port_bindings.keys().cloned().collect();
+    let mut ports: Vec<String> = port_bindings
         .into_iter()
         .map(|(key, bindings)| {
-            let host_port = bindings
-                .and_then(|list| list.into_iter().next())
-                .and_then(|binding| binding.host_port)
-                .unwrap_or_default();
-            if host_port.is_empty() {
-                key
-            } else {
-                format!("{host_port}:{key}")
+            let binding = bindings.and_then(|list| list.into_iter().next());
+            match binding.and_then(|binding| binding.host_port) {
+                Some(host_port) if !host_port.is_empty() => format!("{host_port}:{key}"),
+                _ => format!("auto:{key}"),
             }
         })
         .collect();
+    if let Some(exposed) = &config.exposed_ports {
+        ports.extend(
+            exposed
+                .iter()
+                .filter(|key| !bound_keys.contains(key))
+                .map(|key| format!("expose:{key}")),
+        );
+    }
     ports.sort();
     let mut networks: Vec<String> = inspected
         .network_settings
@@ -1183,35 +1457,53 @@ pub async fn container_config(id: &str) -> Result<ContainerConfigOut, ApiError> 
     let mounts = inspected
         .mounts
         .unwrap_or_default()
-        .iter()
-        // Anonymous volumes get a fresh copy in the duplicate, so do not
-        // promise the reader they carry over.
-        .filter(|mount| {
-            !(mount.typ.as_deref() == Some("volume")
-                && mount.name.clone().unwrap_or_default().len() == 64
-                && mount
-                    .name
-                    .clone()
-                    .unwrap_or_default()
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit()))
-        })
-        .map(|mount| {
-            format!(
-                "{} -> {}{}",
+        .into_iter()
+        .map(|mount| MountEdit {
+            source: if mount.typ.as_deref() == Some("volume") {
                 mount
-                    .source
-                    .clone()
-                    .unwrap_or_else(|| mount.name.clone().unwrap_or_default()),
-                mount.destination.clone().unwrap_or_default(),
-                if mount.rw == Some(false) { " ro" } else { "" }
-            )
+                    .name
+                    .unwrap_or_else(|| mount.source.unwrap_or_default())
+            } else if mount.typ.as_deref() == Some("tmpfs") {
+                String::new()
+            } else {
+                mount.source.unwrap_or_default()
+            },
+            destination: mount.destination.unwrap_or_default(),
+            mount_type: mount.typ.unwrap_or_else(|| "bind".into()),
+            read_only: mount.rw == Some(false),
         })
         .collect();
+    let env = config
+        .env
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| {
+            let (key, value) = entry.split_once('=').unwrap_or((entry, ""));
+            EnvOut {
+                key: key.to_string(),
+                value: value.to_string(),
+            }
+        })
+        .collect();
+    let mut labels: Vec<LabelOut> = config
+        .labels
+        .as_ref()
+        .into_iter()
+        .flatten()
+        .map(|(key, value)| LabelOut {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect();
+    labels.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(ContainerConfigOut {
         name,
         image: config.image.unwrap_or_default(),
-        env: config.env.unwrap_or_default(),
+        command: config.cmd.unwrap_or_default(),
+        entrypoint: config.entrypoint.unwrap_or_default(),
+        env,
+        labels,
         ports,
         restart_policy: host
             .restart_policy
@@ -1910,6 +2202,16 @@ mod tests {
     use bollard::models::{EndpointIpamConfig, MountPoint, NetworkSettings};
 
     #[test]
+    fn invalid_environment_keys_do_not_echo_values() {
+        let error = environment_lines(&[EnvOut {
+            key: "INVALID=KEY".into(),
+            value: "sensitive-test-value".into(),
+        }])
+        .unwrap_err();
+        assert!(!error.message.contains("sensitive-test-value"));
+    }
+
+    #[test]
     fn image_references_allow_registry_paths() {
         assert_eq!(
             checked_image_ref("searxng/searxng:latest").unwrap(),
@@ -1952,7 +2254,7 @@ mod tests {
         let binds = body.host_config.unwrap().binds.unwrap();
         assert!(binds.contains(&"t106-vol:/data".to_string()));
         assert!(binds.contains(&"/srv/app:/app:ro".to_string()));
-        assert!(!binds.iter().any(|bind| bind.contains("/anon")));
+        assert!(binds.contains(&format!("{}:/anon", "f".repeat(64))));
     }
 
     fn row(
@@ -2297,10 +2599,23 @@ mod tests {
     fn duplicate_body_carries_the_config_and_applies_edits() {
         let inspected = sample_inspected();
         let edits = ContainerEdits {
-            image: None,
-            env: Some(vec!["A=2".into(), "   ".into(), "B=3".into()]),
-            ports: Some(vec!["8080:80".into(), "53:53/udp".into()]),
-            restart: None,
+            env: Some(vec![
+                EnvOut {
+                    key: "A".into(),
+                    value: "2".into(),
+                },
+                EnvOut {
+                    key: "B".into(),
+                    value: "3=extra".into(),
+                },
+            ]),
+            ports: Some(vec![
+                "8080:80".into(),
+                "53:53/udp".into(),
+                "expose:8081/tcp".into(),
+                "auto:82/tcp".into(),
+            ]),
+            ..Default::default()
         };
         let body = build_container_body(&inspected, &edits).unwrap();
         assert_eq!(body.image.as_deref(), Some("redis:7"));
@@ -2308,7 +2623,7 @@ mod tests {
             body.env
                 .as_deref()
                 .map(|env| env.iter().map(String::as_str).collect::<Vec<_>>()),
-            Some(vec!["A=2", "B=3"])
+            Some(vec!["A=2", "B=3=extra"])
         );
         let host = body.host_config.as_ref().unwrap();
         assert_eq!(host.memory, Some(268_435_456));
@@ -2329,10 +2644,19 @@ mod tests {
         );
         assert!(bindings.contains_key("53/udp"));
         assert_eq!(
+            bindings
+                .get("82/tcp")
+                .and_then(Option::as_ref)
+                .and_then(|items| items.first())
+                .and_then(|binding| binding.host_port.as_deref()),
+            None
+        );
+        assert!(!bindings.contains_key("8081/tcp"));
+        assert_eq!(
             body.exposed_ports
                 .as_deref()
                 .map(|ports| ports.iter().map(String::as_str).collect::<Vec<_>>()),
-            Some(vec!["80/tcp", "53/udp"])
+            Some(vec!["80/tcp", "53/udp", "8081/tcp", "82/tcp"])
         );
         let net = body
             .networking_config

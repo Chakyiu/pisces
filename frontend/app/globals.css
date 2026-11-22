@@ -580,8 +580,22 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border-subtle
   display: grid;
   gap: 16px;
 }
+.dialog.container-edit-dialog {
+  width: min(760px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
 .dialog h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.edit-rows { display: grid; gap: 8px; }
+.edit-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto; gap: 8px; align-items: center; }
+.mount-edit-row { grid-template-columns: 100px minmax(100px, 1fr) minmax(100px, 1fr) auto auto; }
+.env-edit-row { grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto auto; }
+.edit-row .field, .edit-row .select { min-width: 0; }
+@media (max-width: 700px) {
+  .edit-row, .mount-edit-row, .env-edit-row { grid-template-columns: 1fr 1fr; }
+  .edit-row .check { justify-self: start; width: auto; }
+}
 .icon { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.5; flex: none; }
 
 @media (prefers-reduced-motion: no-preference) {

@@ -123,10 +123,12 @@ export function Dialog({
   title,
   onClose,
   children,
+  className,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -166,7 +168,7 @@ export function Dialog({
   return (
     <div className="scrim" onMouseDown={onClose}>
       <div
-        className="dialog"
+        className={`dialog ${className ?? ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="dialog-title"

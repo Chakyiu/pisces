@@ -18,6 +18,10 @@ export type Port = {
   protocol: string;
 };
 
+export type EnvValue = { key: string; value: string };
+export type LabelValue = { key: string; value: string };
+export type MountEdit = { source: string; destination: string; mountType: string; readOnly: boolean };
+
 export type Container = {
   id: string;
   name: string;
