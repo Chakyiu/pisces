@@ -9,7 +9,7 @@ export default function Home() {
   const session = useSession();
   const router = useRouter();
   useEffect(() => {
-    if (session.status === "in") router.replace("/endpoints");
+    if (session.status === "in") router.replace("/home");
     if (session.status === "out") router.replace(session.ended ? "/login?ended=1" : "/login");
   }, [session, router]);
   if (session.status === "error") {
