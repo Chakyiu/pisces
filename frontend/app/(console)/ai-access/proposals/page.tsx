@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api } from "../../../../lib/api";
 import { atTime, clock, left } from "../../../../lib/format";
 import { unifiedDiff, type DiffLine } from "../../../../lib/diff";
+import { duplicateEffect, effectiveFields } from "../../../../lib/proposal-view";
 import type { Proposal, StackDetail } from "../../../../lib/types";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../components/bits";
 import { AiAccessTabs } from "../../../../components/ai-access-tabs";
@@ -220,10 +221,18 @@ function ReviewDialog({
   const [diffError, setDiffError] = useState("");
   const decided = proposal.status !== "pending";
   const stack = STACK_ACTIONS.has(proposal.action);
-  const payload = (proposal.payload ?? {}) as { project?: string; compose?: string };
+  const payload = (proposal.payload ?? {}) as { project?: string; compose?: string; name?: unknown };
   const project = proposal.project ?? payload.project ?? "";
   const environment = endpoints.find((endpoint) => endpoint.id === proposal.endpointId)?.name ?? proposal.endpointId;
   const name = proposal.containerName ?? project ?? proposal.containerId ?? "";
+  const fields = effectiveFields(proposal.action, proposal.payload);
+  // The source is identified by its recorded id: the name is only a display
+  // value, and an older proposal record may not carry one.
+  const sourceName = (proposal.containerName ?? "").trim();
+  const source = sourceName || proposal.containerId || "not recorded";
+  const effect = duplicateEffect(proposal.containerName, proposal.containerId, payload.name);
+  const rows =
+    proposal.action === "duplicate" ? [{ label: "Source container", value: source }, ...fields] : fields;
 
   useEffect(() => {
     if (!stack || !payload.compose) return;
@@ -280,6 +289,19 @@ function ReviewDialog({
           <div className="fact"><span>Requested by</span><strong className="mono">{proposal.credentialId ?? "agent credential"}</strong></div>
           <div className="fact"><span>Proposal ID</span><strong className="mono">{proposal.id}</strong></div>
         </div>
+        {rows.length > 0 ? (
+          <>
+            <h3>What will run</h3>
+            <div className="facts">
+              {rows.map((field) => (
+                <div className="fact" key={field.label}>
+                  <span>{field.label}</span>
+                  <strong className="mono" style={{ whiteSpace: "pre-wrap" }}>{field.value}</strong>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : null}
         {stack ? (
           <>
             <h3>Compose changes</h3>
@@ -294,15 +316,28 @@ function ReviewDialog({
               </div>
             )}
             <p className="ai-help">
-              Environment values, label values, and mount sources are removed by Pisces before the
-              proposal is stored. Pisces re-checks every service and mount at the moment you confirm.
+              Pisces stores the compose file as written, so the diff above is exactly what will run.
+              It does not scrub values out of it: a compose that asks for a credential-bearing
+              environment value, label, or mount source is refused when it is proposed, and checked
+              again when you confirm. Every service and mount is re-checked at that moment too.
             </p>
           </>
         ) : null}
         {proposal.action === "duplicate" ? (
           <p className="ai-help">
-            The copy inherits the source container&apos;s environment, labels, and mounts. Values the
-            agent proposed in those fields are not used, and are not stored with the proposal.
+            The copy inherits the source container&apos;s environment, labels, and mounts. Pisces
+            rejects agent-proposed values for those fields, and never stores one.
+            {effect === "replace"
+              ? ` The new name matches the source container's name, so Pisces replaces ${source} in place.`
+              : effect === "replace-unknown-source"
+                ? ` Pisces replaces ${source} in place if the new name matches it, ignoring case. This proposal does not record the source's name, so check that the new name is not the same.`
+                : ""}
+          </p>
+        ) : null}
+        {proposal.action === "recreate" && !stack ? (
+          <p className="ai-help">
+            Pisces stops the container, starts a replacement from its current configuration under the
+            same name, and removes the original only once the replacement is running.
           </p>
         ) : null}
         {decided ? (
