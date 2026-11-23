@@ -393,6 +393,8 @@ textarea.field {
 .bulk .btn:first-child { border-radius: 4px 0 0 4px; }
 .bulk .btn:last-child { border-radius: 0 4px 4px 0; }
 .bulk .btn:only-child { border-radius: 4px; }
+/* The -1px seam overlap hides a danger button's red border under the next button's. */
+.bulk .btn.danger { position: relative; z-index: 1; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 720px; }
