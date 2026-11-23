@@ -181,7 +181,10 @@ export function ContainerDuplicateDialog({
                   </select>
                   <input className="field" aria-label={`Mount ${index + 1} source`} disabled={mount.mountType === "tmpfs"} value={mount.source} onChange={(event) => updateMount(index, { source: event.target.value })} />
                   <input className="field" aria-label={`Mount ${index + 1} destination`} value={mount.destination} onChange={(event) => updateMount(index, { destination: event.target.value })} />
-                  <label className="check"><input type="checkbox" checked={mount.readOnly} onChange={(event) => updateMount(index, { readOnly: event.target.checked })} /> Read-only</label>
+                  <label className="check-field">
+                    <input type="checkbox" checked={mount.readOnly} onChange={(event) => updateMount(index, { readOnly: event.target.checked })} />
+                    <span>Read-only</span>
+                  </label>
                   <button className="btn" type="button" aria-label={`Remove mount ${index + 1}`} onClick={() => setMounts((current) => current.filter((_, rowIndex) => rowIndex !== index))}>Remove</button>
                 </div>
               ))}
