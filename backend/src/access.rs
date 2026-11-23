@@ -145,7 +145,7 @@ pub fn credential_view(dir: &Path, now: u64) -> CredentialView {
 
 fn base64url(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity((bytes.len() * 4 + 2) / 3);
+    let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
@@ -206,7 +206,8 @@ fn verifier_bytes(verifier: &str) -> [u8; 32] {
 /// write, so two valid credentials never exist at once.
 pub fn issue_credential(dir: &Path, issued_by: &str, now: u64) -> Result<IssuedCredential, String> {
     let mut raw = [0u8; 32];
-    getrandom::fill(&mut raw).map_err(|_| "The agent credential could not be generated.".to_string())?;
+    getrandom::fill(&mut raw)
+        .map_err(|_| "The agent credential could not be generated.".to_string())?;
     let secret = format!("{AGENT_PREFIX}{}", base64url(&raw));
     let record = CredentialRecord {
         id: format!("agt_{}", crate::store::new_id()),
@@ -339,9 +340,10 @@ pub fn load_policy(dir: &Path) -> PolicyFile {
             readable: true,
         };
     }
-    match fs::read_to_string(&path).ok().and_then(|text| {
-        serde_json::from_str::<Vec<PolicyEntry>>(&text).ok()
-    }) {
+    match fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<PolicyEntry>>(&text).ok())
+    {
         Some(entries) => PolicyFile {
             entries,
             readable: true,
@@ -353,11 +355,49 @@ pub fn load_policy(dir: &Path) -> PolicyFile {
     }
 }
 
+/// Docker accepts a unique prefix of a container id, so one container arrives
+/// as a short id from a list and as the full id from an inspect. Both forms are
+/// the same identity; nothing else is.
+fn same_container_id(stored: &str, queried: &str) -> bool {
+    if stored.is_empty() || queried.is_empty() {
+        return false;
+    }
+    if stored.eq_ignore_ascii_case(queried) {
+        return true;
+    }
+    let (short, long) = if stored.len() <= queried.len() {
+        (stored, queried)
+    } else {
+        (queried, stored)
+    };
+    short.len() >= 6
+        && short.chars().all(|c| c.is_ascii_hexdigit())
+        && long
+            .to_ascii_lowercase()
+            .starts_with(&short.to_ascii_lowercase())
+}
+
+/// A stored entry names the container it was written for. An entry that shares
+/// only the name belongs to a container that is gone (a Docker name is reused
+/// by a remove/recreate outside Pisces), so it is replaced, never kept next to
+/// the newer entry. Docker compares container names case-insensitively.
+fn same_policy_target(item: &PolicyEntry, entry: &PolicyEntry) -> bool {
+    if item.endpoint_id != entry.endpoint_id {
+        return false;
+    }
+    if same_container_id(&item.container_id, &entry.container_id) {
+        return true;
+    }
+    !entry.container_name.is_empty()
+        && item
+            .container_name
+            .eq_ignore_ascii_case(&entry.container_name)
+}
+
 pub fn remember_policy(dir: &Path, entry: PolicyEntry) -> Result<(), String> {
     let mut file = load_policy(dir);
-    file.entries.retain(|item| {
-        !(item.endpoint_id == entry.endpoint_id && item.container_id == entry.container_id)
-    });
+    file.entries
+        .retain(|item| !same_policy_target(item, &entry));
     file.entries.push(entry);
     save_policy(dir, &file.entries)
 }
@@ -367,16 +407,39 @@ fn save_policy(dir: &Path, entries: &[PolicyEntry]) -> Result<(), String> {
     write_atomic(&policy_path(dir), &text, POLICY_MSG)
 }
 
-pub fn policy_state(file: &PolicyFile, endpoint_id: &str, id: &str, name: &str) -> State {
-    file.entries
-        .iter()
-        .find(|entry| {
-            entry.endpoint_id == endpoint_id
-                && (entry.container_id == id
-                    || (!name.is_empty() && entry.container_name == name))
-        })
-        .map(|entry| entry.state)
-        .unwrap_or(State::Locked)
+/// Identity, not the display name, decides which entry applies: a container
+/// recreated outside Pisces gets a new id, so it starts Locked instead of
+/// inheriting the policy of the container whose name it reused. Duplicate
+/// entries left by an older build resolve to the newest write, and a tie
+/// resolves to the most restrictive state, so the lookup never fails open.
+/// No entry means Locked.
+pub fn policy_state(file: &PolicyFile, endpoint_id: &str, id: &str) -> State {
+    let mut chosen: Option<&PolicyEntry> = None;
+    for entry in file.entries.iter().filter(|entry| {
+        entry.endpoint_id == endpoint_id && same_container_id(&entry.container_id, id)
+    }) {
+        chosen = Some(match chosen {
+            None => entry,
+            Some(current) if entry.updated_at > current.updated_at => entry,
+            Some(current)
+                if entry.updated_at == current.updated_at
+                    && restriction(entry.state) < restriction(current.state) =>
+            {
+                entry
+            }
+            Some(current) => current,
+        });
+    }
+    chosen.map(|entry| entry.state).unwrap_or(State::Locked)
+}
+
+/// Lower is more restrictive; used only to break a same-second tie.
+fn restriction(state: State) -> u8 {
+    match state {
+        State::Locked => 0,
+        State::Read => 1,
+        State::Operate => 2,
+    }
 }
 
 pub fn forget_policy(dir: &Path, endpoint_id: &str, id: &str, name: &str) {
@@ -384,8 +447,8 @@ pub fn forget_policy(dir: &Path, endpoint_id: &str, id: &str, name: &str) {
     let before = file.entries.len();
     file.entries.retain(|entry| {
         !(entry.endpoint_id == endpoint_id
-            && (entry.container_id == id
-                || (!name.is_empty() && entry.container_name == name)))
+            && (same_container_id(&entry.container_id, id)
+                || (!name.is_empty() && entry.container_name.eq_ignore_ascii_case(name))))
     });
     if file.entries.len() != before {
         let _ = save_policy(dir, &file.entries);
@@ -398,8 +461,8 @@ pub fn rename_policy(dir: &Path, endpoint_id: &str, id: &str, old_name: &str, ne
     let mut changed = false;
     for entry in &mut file.entries {
         let matches = entry.endpoint_id == endpoint_id
-            && (entry.container_id == id
-                || (!old_name.is_empty() && entry.container_name == old_name));
+            && (same_container_id(&entry.container_id, id)
+                || (!old_name.is_empty() && entry.container_name.eq_ignore_ascii_case(old_name)));
         if matches && entry.container_name != new_name {
             entry.container_name = new_name.to_string();
             entry.updated_at = now();
@@ -423,7 +486,8 @@ pub fn copy_policy(
     target_name: &str,
 ) -> Result<(), String> {
     let file = load_policy(dir);
-    let state = policy_state(&file, endpoint_id, source_id, &source.name);
+    let source_id = source.canonical_id(source_id);
+    let state = policy_state(&file, endpoint_id, source_id);
     remember_policy(
         dir,
         PolicyEntry {
@@ -443,6 +507,8 @@ pub fn copy_policy(
 /// the policy file.
 #[derive(Clone, Debug, Default)]
 pub struct LiveAccess {
+    /// The id the engine reported for this container. Empty when unknown.
+    pub id: String,
     pub name: String,
     pub mount_sources: Vec<String>,
     pub volume_names: Vec<String>,
@@ -454,6 +520,19 @@ pub struct LiveAccess {
     pub security_opt: Vec<String>,
     pub volumes_from: Vec<String>,
     pub links: Vec<String>,
+}
+
+impl LiveAccess {
+    /// Policy is keyed on the engine's id, so every read and write of a
+    /// container uses one form. The queried form is the fallback for a live
+    /// shape built without an inspect.
+    pub fn canonical_id<'a>(&'a self, queried: &'a str) -> &'a str {
+        if self.id.is_empty() {
+            queried
+        } else {
+            &self.id
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -605,7 +684,9 @@ pub fn forced_lock(data_dir: &Path, live: &LiveAccess) -> ForcedLock {
     }
     let unconfined = live.security_opt.iter().any(|opt| {
         let opt = opt.to_ascii_lowercase().replace(' ', "");
-        opt.contains("seccomp=unconfined") || opt.contains("apparmor=unconfined") || opt == "label=disable"
+        opt.contains("seccomp=unconfined")
+            || opt.contains("apparmor=unconfined")
+            || opt == "label=disable"
     });
     if unconfined {
         return ForcedLock::because("this container disables a security profile");
@@ -671,12 +752,12 @@ pub fn mutation_from_compose(compose: &str) -> Mutation {
             } else {
                 match name {
                     "environment" => {
-                        if let Some(key) = compose_key(trimmed, true) {
+                        if let Some(key) = compose_key(trimmed) {
                             mutation.env_keys.push(key);
                         }
                     }
                     "labels" => {
-                        if let Some(key) = compose_key(trimmed, false) {
+                        if let Some(key) = compose_key(trimmed) {
                             mutation.label_keys.push(key);
                         }
                     }
@@ -737,7 +818,7 @@ pub fn mutation_from_compose(compose: &str) -> Mutation {
     mutation
 }
 
-fn compose_key(trimmed: &str, env: bool) -> Option<String> {
+fn compose_key(trimmed: &str) -> Option<String> {
     let item = trimmed.strip_prefix("- ").unwrap_or(trimmed);
     let key = item
         .split_once('=')
@@ -748,10 +829,7 @@ fn compose_key(trimmed: &str, env: bool) -> Option<String> {
         .trim_matches('"')
         .to_string();
     if key.is_empty() {
-        return None;
-    }
-    if env {
-        Some(key)
+        None
     } else {
         Some(key)
     }
@@ -823,11 +901,7 @@ pub fn refusal(
             return Some("The agent may not disable a container security profile.".into());
         }
     }
-    for target in mutation
-        .volumes_from
-        .iter()
-        .chain(mutation.links.iter())
-    {
+    for target in mutation.volumes_from.iter().chain(mutation.links.iter()) {
         if !reachable(target).allows_operate() {
             return Some(
                 "The agent may not share volumes or links with a container it cannot operate."
@@ -866,7 +940,10 @@ fn redact_compose_section(lines: &mut [String], start: usize, indent: usize, sec
         let item_prefix = if list_item.is_some() { "- " } else { "" };
         match section {
             "environment" | "labels" => {
-                let key = body.split_once('=').map(|(key, _)| key).or_else(|| body.split_once(':').map(|(key, _)| key));
+                let key = body
+                    .split_once('=')
+                    .map(|(key, _)| key)
+                    .or_else(|| body.split_once(':').map(|(key, _)| key));
                 if let Some(key) = key {
                     let key = key.trim_end_matches(':').trim();
                     *line = format!("{indent_text}{item_prefix}{key}:");
@@ -1000,8 +1077,84 @@ pub fn load_proposals(dir: &Path) -> Result<Vec<Proposal>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = fs::read_to_string(&path).map_err(|_| "The proposal list could not be read.".to_string())?;
-    serde_json::from_str(&text).map_err(|_| "The proposal list could not be read.".to_string())
+    let text = fs::read_to_string(&path)
+        .map_err(|_| "The proposal list could not be read.".to_string())?;
+    let mut items: Vec<Proposal> = serde_json::from_str(&text)
+        .map_err(|_| "The proposal list could not be read.".to_string())?;
+    // Records written before payloads were sanitized are scrubbed on the way in
+    // so nothing that reads a proposal can see a value that was stored once.
+    for item in &mut items {
+        sanitize_payload(&mut item.payload);
+    }
+    Ok(items)
+}
+
+/// A proposal keeps the shape of the request, never the material the agent is
+/// not allowed to hold: environment values, label values and mount sources are
+/// blanked wherever they appear in the payload.
+pub fn sanitize_payload(payload: &mut serde_json::Value) {
+    match payload {
+        serde_json::Value::Array(items) => items.iter_mut().for_each(sanitize_payload),
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                match key.as_str() {
+                    "env" | "labels" => blank_values(value),
+                    "mounts" => blank_mount_sources(value),
+                    _ => sanitize_payload(value),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn blank_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                match item {
+                    serde_json::Value::Object(map) => {
+                        if map.contains_key("value") {
+                            map.insert("value".into(), serde_json::Value::String(String::new()));
+                        }
+                    }
+                    serde_json::Value::String(line) => {
+                        if let Some((key, _)) = line.split_once('=') {
+                            *line = format!("{key}=");
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for item in map.values_mut() {
+                *item = serde_json::Value::String(String::new());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn blank_mount_sources(value: &mut serde_json::Value) {
+    let serde_json::Value::Array(items) = value else {
+        return;
+    };
+    for item in items {
+        match item {
+            serde_json::Value::Object(map) => {
+                if map.contains_key("source") {
+                    map.insert("source".into(), serde_json::Value::String(String::new()));
+                }
+            }
+            serde_json::Value::String(line) => {
+                if let Some((_, rest)) = line.split_once(':') {
+                    *line = format!("<redacted>:{rest}");
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn save_proposals(dir: &Path, proposals: &[Proposal]) -> Result<(), String> {
@@ -1016,6 +1169,8 @@ pub fn create_proposal(
     now: u64,
 ) -> Result<Proposal, String> {
     let mut proposals = load_proposals(dir)?;
+    let mut payload = request.payload;
+    sanitize_payload(&mut payload);
     let proposal = Proposal {
         id: format!("prp_{}", crate::store::new_id()),
         action: request.action,
@@ -1024,7 +1179,7 @@ pub fn create_proposal(
         container_name: request.container_name,
         project: request.project,
         credential_id: issuer.map(str::to_string),
-        payload: request.payload,
+        payload,
         created_at: now,
         expires_at: now + PROPOSAL_SECS,
         status: ProposalStatus::Pending,
@@ -1252,17 +1407,11 @@ mod tests {
         let dir = test_dir();
         let file = load_policy(&dir);
         assert!(file.readable);
-        assert_eq!(
-            policy_state(&file, "e1", "c1", "web"),
-            State::Locked
-        );
+        assert_eq!(policy_state(&file, "e1", "c1"), State::Locked);
         fs::write(policy_path(&dir), "{oops").unwrap();
         let file = load_policy(&dir);
         assert!(!file.readable);
-        assert_eq!(
-            policy_state(&file, "e1", "c1", "web"),
-            State::Locked
-        );
+        assert_eq!(policy_state(&file, "e1", "c1"), State::Locked);
         remember_policy(
             &dir,
             PolicyEntry {
@@ -1277,19 +1426,94 @@ mod tests {
         .unwrap();
         let file = load_policy(&dir);
         assert!(file.readable);
-        assert_eq!(policy_state(&file, "e1", "c1", ""), State::Operate);
-        assert_eq!(policy_state(&file, "e2", "c1", ""), State::Locked);
+        assert_eq!(policy_state(&file, "e1", "c1"), State::Operate);
+        assert_eq!(policy_state(&file, "e2", "c1"), State::Locked);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn entry(id: &str, name: &str, state: State, updated_at: u64) -> PolicyEntry {
+        PolicyEntry {
+            container_id: id.to_string(),
+            endpoint_id: "e1".into(),
+            container_name: name.to_string(),
+            state,
+            updated_at,
+            updated_by: "operator".into(),
+        }
+    }
+
+    /// QA repro A: the same container reached as a short id and as a full id
+    /// must be one policy entry, so the newer Locked wins over a stale Operate.
+    #[test]
+    fn duplicate_id_forms_collapse_to_the_newest_write() {
+        let dir = test_dir();
+        let full = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        let short = &full[..12];
+        remember_policy(&dir, entry(short, "web", State::Operate, 10)).unwrap();
+        remember_policy(&dir, entry(full, "web", State::Locked, 20)).unwrap();
+        let file = load_policy(&dir);
+        assert_eq!(file.entries.len(), 1);
+        assert_eq!(policy_state(&file, "e1", full), State::Locked);
+        assert_eq!(policy_state(&file, "e1", short), State::Locked);
+        assert_eq!(policy_state(&file, "e1", &full[..6]), State::Locked);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// QA repro B: a container removed and recreated outside Pisces keeps the
+    /// old name with a new id. The stale grant must not follow the name.
+    #[test]
+    fn a_reused_name_never_inherits_the_old_grant() {
+        let dir = test_dir();
+        remember_policy(&dir, entry("aaa111", "web", State::Operate, 10)).unwrap();
+        let file = load_policy(&dir);
+        assert_eq!(policy_state(&file, "e1", "bbb222"), State::Locked);
+        remember_policy(&dir, entry("bbb222", "web", State::Locked, 20)).unwrap();
+        let file = load_policy(&dir);
+        assert_eq!(file.entries.len(), 1);
+        assert_eq!(policy_state(&file, "e1", "aaa111"), State::Locked);
+        assert_eq!(policy_state(&file, "e1", "bbb222"), State::Locked);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A policy file written by an older build can hold two entries for one
+    /// container. The lookup takes the newest, and a tie the most restrictive.
+    #[test]
+    fn stale_duplicate_entries_resolve_to_the_restrictive_one() {
+        let dir = test_dir();
+        let full = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        let legacy = vec![
+            entry(&full[..12], "web", State::Operate, 20),
+            entry(full, "web", State::Locked, 20),
+        ];
+        fs::write(policy_path(&dir), serde_json::to_string(&legacy).unwrap()).unwrap();
+        let file = load_policy(&dir);
+        assert_eq!(policy_state(&file, "e1", full), State::Locked);
+        let older = vec![
+            entry(full, "web", State::Read, 5),
+            entry(&full[..12], "web", State::Operate, 9),
+        ];
+        fs::write(policy_path(&dir), serde_json::to_string(&older).unwrap()).unwrap();
+        let file = load_policy(&dir);
+        assert_eq!(policy_state(&file, "e1", full), State::Operate);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_short_id_below_six_characters_is_not_an_identity() {
+        let dir = test_dir();
+        remember_policy(&dir, entry("abcdef12", "web", State::Operate, 10)).unwrap();
+        let file = load_policy(&dir);
+        assert_eq!(policy_state(&file, "e1", "abc"), State::Locked);
+        assert_eq!(policy_state(&file, "e1", "abcdef12"), State::Operate);
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn forced_lock_sees_every_dangerous_shape() {
         let dir = test_dir();
-        assert!(forced_lock(&dir, &live("web", &["/var/run/docker.sock"]))
-            .locked);
+        assert!(forced_lock(&dir, &live("web", &["/var/run/docker.sock"])).locked);
         assert!(forced_lock(&dir, &live("web", &["//./pipe/docker_engine"])).locked);
-        assert!(forced_lock(&dir, &live("web", &["/"]))
-            .locked);
+        assert!(forced_lock(&dir, &live("web", &["/"])).locked);
         assert!(forced_lock(&dir, &live("web", &["C:\\"])).locked);
         let mount = format!("{}/stacks", dir.display());
         assert!(forced_lock(&dir, &live("web", &[mount.as_str()])).locked);
@@ -1348,7 +1572,9 @@ mod tests {
         assert!(refusal(&dir, &privileged, &locked).is_some());
         let mut env = Mutation::default();
         env.env_keys.push("PISCES_JWT_SECRET".into());
-        assert!(refusal(&dir, &env, &allowed).unwrap().contains("environment"));
+        assert!(refusal(&dir, &env, &allowed)
+            .unwrap()
+            .contains("environment"));
         let mut labels = Mutation::default();
         labels.label_keys.push("pisces.ai.state".into());
         assert!(refusal(&dir, &labels, &allowed).unwrap().contains("labels"));
@@ -1359,14 +1585,20 @@ mod tests {
     fn compose_mutation_and_redaction_keep_secrets_out() {
         let compose = "services:\n  web:\n    image: nginx\n    environment:\n      - PISCES_JWT_SECRET=abc\n      - NORMAL=hidden\n    labels:\n      pisces.ai.state: operate\n    volumes:\n      - /var/run/docker.sock:/var/run/docker.sock\n      - ./data:/data\n";
         let mutation = mutation_from_compose(compose);
-        assert!(mutation.env_keys.iter().any(|key| key == "PISCES_JWT_SECRET"));
-        assert!(mutation.label_keys.iter().any(|key| key == "pisces.ai.state"));
+        assert!(mutation
+            .env_keys
+            .iter()
+            .any(|key| key == "PISCES_JWT_SECRET"));
+        assert!(mutation
+            .label_keys
+            .iter()
+            .any(|key| key == "pisces.ai.state"));
         assert!(mutation
             .mounts
             .iter()
             .any(|mount| mount.source == "/var/run/docker.sock"));
         let allowed = |_: &str| State::Operate;
-        assert!(refusal(&Path::new("./data"), &mutation, &allowed)
+        assert!(refusal(Path::new("./data"), &mutation, &allowed)
             .unwrap()
             .contains("Docker socket"));
         let redacted = redact_compose(compose);
@@ -1377,6 +1609,69 @@ mod tests {
         assert!(!redacted.contains("./data"));
         assert!(redacted.contains("/data"));
         assert!(redacted.contains("PISCES_JWT_SECRET"));
+    }
+
+    #[test]
+    fn proposal_payloads_keep_the_shape_but_not_the_values() {
+        let dir = test_dir();
+        let request = ProposalRequest {
+            action: "duplicate".into(),
+            endpoint_id: "e1".into(),
+            container_id: Some("c1".into()),
+            container_name: Some("web".into()),
+            project: None,
+            payload: serde_json::json!({
+                "name": "web-copy",
+                "env": [
+                    {"key": "DB_PASSWORD", "value": "hunter2"},
+                    {"key": "MODE", "value": "prod"}
+                ],
+                "labels": [{"key": "owner", "value": "secret-label"}],
+                "mounts": [{
+                    "source": "/srv/secret",
+                    "destination": "/data",
+                    "mountType": "bind",
+                    "readOnly": false
+                }],
+                "ports": ["8080:80"],
+                "restartPolicy": "no"
+            }),
+        };
+        let proposal = create_proposal(&dir, request, Some("agt_1"), 100).unwrap();
+        let payload = &proposal.payload;
+        assert_eq!(payload["name"], "web-copy");
+        assert_eq!(payload["env"][0]["key"], "DB_PASSWORD");
+        assert_eq!(payload["env"][0]["value"], "");
+        assert_eq!(payload["labels"][0]["value"], "");
+        assert_eq!(payload["mounts"][0]["source"], "");
+        assert_eq!(payload["mounts"][0]["destination"], "/data");
+        assert_eq!(payload["ports"][0], "8080:80");
+        let raw = fs::read_to_string(proposal_path(&dir)).unwrap();
+        assert!(!raw.contains("hunter2"));
+        assert!(!raw.contains("secret-label"));
+        assert!(!raw.contains("/srv/secret"));
+
+        // A record an older build wrote is scrubbed on the way in.
+        let legacy = serde_json::json!([{
+            "id": "prp_legacy",
+            "action": "duplicate",
+            "endpointId": "e1",
+            "payload": {
+                "env": ["DB_PASSWORD=hunter2"],
+                "labels": ["owner=secret-label"],
+                "mounts": ["/srv/secret:/data:rw"]
+            },
+            "createdAt": 1,
+            "expiresAt": 2,
+            "status": "pending"
+        }]);
+        fs::write(proposal_path(&dir), serde_json::to_string(&legacy).unwrap()).unwrap();
+        let loaded = load_proposals(&dir).unwrap();
+        let payload = &loaded[0].payload;
+        assert_eq!(payload["env"][0], "DB_PASSWORD=");
+        assert_eq!(payload["labels"][0], "owner=");
+        assert_eq!(payload["mounts"][0], "<redacted>:/data:rw");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1397,11 +1692,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(proposal.status, ProposalStatus::Pending);
-        let decided = decide_proposal(&dir, &proposal.id, ProposalStatus::Confirmed, "operator", 1001, None).unwrap();
+        let decided = decide_proposal(
+            &dir,
+            &proposal.id,
+            ProposalStatus::Confirmed,
+            "operator",
+            1001,
+            None,
+        )
+        .unwrap();
         assert_eq!(decided.status, ProposalStatus::Confirmed);
         assert_eq!(
-            decide_proposal(&dir, &proposal.id, ProposalStatus::Confirmed, "operator", 1002, None)
-                .unwrap_err(),
+            decide_proposal(
+                &dir,
+                &proposal.id,
+                ProposalStatus::Confirmed,
+                "operator",
+                1002,
+                None
+            )
+            .unwrap_err(),
             DecideError::Conflict
         );
         let stale = create_proposal(
@@ -1419,13 +1729,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            decide_proposal(&dir, &stale.id, ProposalStatus::Confirmed, "operator", 2000 + PROPOSAL_SECS + 1, None)
-                .unwrap_err(),
+            decide_proposal(
+                &dir,
+                &stale.id,
+                ProposalStatus::Confirmed,
+                "operator",
+                2000 + PROPOSAL_SECS + 1,
+                None
+            )
+            .unwrap_err(),
             DecideError::Expired
         );
         let listed = load_proposals(&dir).unwrap();
         assert_eq!(
-            listed.iter().find(|item| item.id == stale.id).unwrap().status,
+            listed
+                .iter()
+                .find(|item| item.id == stale.id)
+                .unwrap()
+                .status,
             ProposalStatus::Expired
         );
         fs::write(proposal_path(&dir), "[broken").unwrap();
@@ -1437,15 +1758,39 @@ mod tests {
     fn agent_route_set_is_deny_by_default() {
         for (method, path, expected) in [
             ("GET", "/api/endpoints", RouteAccess::Read),
-            ("GET", "/api/endpoints/e1/containers/c1/logs", RouteAccess::Read),
-            ("GET", "/api/endpoints/e1/containers/c1/logs/stream", RouteAccess::Read),
+            (
+                "GET",
+                "/api/endpoints/e1/containers/c1/logs",
+                RouteAccess::Read,
+            ),
+            (
+                "GET",
+                "/api/endpoints/e1/containers/c1/logs/stream",
+                RouteAccess::Read,
+            ),
             ("GET", "/api/endpoints/e1/stacks", RouteAccess::Read),
-            ("POST", "/api/endpoints/e1/containers/c1/start", RouteAccess::Mutate),
-            ("PUT", "/api/endpoints/e1/containers/c1/settings", RouteAccess::Mutate),
+            (
+                "POST",
+                "/api/endpoints/e1/containers/c1/start",
+                RouteAccess::Mutate,
+            ),
+            (
+                "PUT",
+                "/api/endpoints/e1/containers/c1/settings",
+                RouteAccess::Mutate,
+            ),
             ("POST", "/api/endpoints/e1/stacks", RouteAccess::Mutate),
             ("PUT", "/api/endpoints/e1/stacks/web", RouteAccess::Mutate),
-            ("GET", "/api/endpoints/e1/containers/c1/console", RouteAccess::Deny),
-            ("DELETE", "/api/endpoints/e1/containers/c1", RouteAccess::Deny),
+            (
+                "GET",
+                "/api/endpoints/e1/containers/c1/console",
+                RouteAccess::Deny,
+            ),
+            (
+                "DELETE",
+                "/api/endpoints/e1/containers/c1",
+                RouteAccess::Deny,
+            ),
             ("POST", "/api/proposals/abc/confirm", RouteAccess::Deny),
             ("GET", "/api/agent/credential", RouteAccess::Deny),
             ("GET", "/api/ai-access/e1/c1", RouteAccess::Deny),

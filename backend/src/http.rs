@@ -342,12 +342,15 @@ pub fn router(state: AppState) -> Router {
             "/api/endpoints/{id}/networks",
             get(list_networks).post(create_network),
         )
-        .route("/api/endpoints/{id}/networks/{name}",
+        .route(
+            "/api/endpoints/{id}/networks/{name}",
             axum::routing::delete(delete_network),
         )
         .route(
             "/api/agent/credential",
-            get(get_credential).post(issue_credential).delete(revoke_credential),
+            get(get_credential)
+                .post(issue_credential)
+                .delete(revoke_credential),
         )
         .route(
             "/api/ai-access/{id}/{container_id}",
@@ -373,11 +376,7 @@ async fn no_store(req: Request, next: Next) -> Response {
     response
 }
 
-async fn require_auth(
-    State(state): State<AppState>,
-    mut req: Request,
-    next: Next,
-) -> Response {
+async fn require_auth(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let public = path == "/api/health"
         || (path == "/api/session" && req.method() == axum::http::Method::POST);
@@ -416,10 +415,8 @@ async fn require_auth(
                 .into_response();
             }
             Err(access::CredentialError::Expired) => {
-                return ApiError::unauthorized(
-                    "This agent credential expired. Issue a new one.",
-                )
-                .into_response();
+                return ApiError::unauthorized("This agent credential expired. Issue a new one.")
+                    .into_response();
             }
             Err(access::CredentialError::Rejected) => {
                 return ApiError::unauthorized("Those credentials were rejected.").into_response();
@@ -481,7 +478,9 @@ fn same_origin(headers: &HeaderMap) -> bool {
     let matches = |candidate: Option<&str>| {
         candidate.is_some_and(|host| authority.as_str().eq_ignore_ascii_case(host))
     };
-    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok());
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
     let forwarded = headers
         .get("x-forwarded-host")
         .and_then(|value| value.to_str().ok());
@@ -572,7 +571,7 @@ async fn access_for(
             readable: policy.readable,
         };
     }
-    let mut value = access::policy_state(&policy, endpoint_id, id, &live.name);
+    let mut value = access::policy_state(&policy, endpoint_id, live.canonical_id(id));
     let mut reason = String::new();
     if value.allows_read() {
         if let Some(shared) = shared_reference_reason(state, endpoint_id, live).await {
@@ -646,7 +645,11 @@ async fn reference_state(
         return Some(access::State::Locked);
     }
     let policy = access::load_policy(&state.data_dir);
-    Some(access::policy_state(&policy, endpoint_id, &found.id, &found.name))
+    Some(access::policy_state(
+        &policy,
+        endpoint_id,
+        live.canonical_id(&found.id),
+    ))
 }
 
 /// Every service in a stack must pass the same bar the agent needs for a single
@@ -661,9 +664,18 @@ async fn stack_guard(
         .await?
         .into_iter()
         .find(|stack| stack.project == project);
+    // A stack with no live service cannot be checked, so it fails closed rather
+    // than skipping the per-service decision.
     let Some(stack) = stack else {
-        return Ok(());
+        return Err(ApiError::forbidden(
+            "This stack has no running services, so its AI access cannot be verified.",
+        ));
     };
+    if stack.containers.is_empty() {
+        return Err(ApiError::forbidden(
+            "This stack has no running services, so its AI access cannot be verified.",
+        ));
+    }
     for container in stack.containers {
         let live = docker::live_access(&container.id).await?;
         let value = access_for(state, endpoint_id, &container.id, &live).await;
@@ -691,7 +703,10 @@ fn refusal_for(
     }
 }
 
-async fn reachable_map(state: &AppState, endpoint_id: &str) -> std::collections::HashMap<String, access::State> {
+async fn reachable_map(
+    state: &AppState,
+    endpoint_id: &str,
+) -> std::collections::HashMap<String, access::State> {
     let mut map = std::collections::HashMap::new();
     let Ok(listed) = docker::list_containers("", "").await else {
         return map;
@@ -776,7 +791,9 @@ async fn revoke_credential(
     let now = access::now();
     let revoked = access::revoke_credential(&state.data_dir, now).map_err(ApiError::daemon)?;
     if !revoked {
-        return Err(ApiError::not_found("There is no agent credential to revoke."));
+        return Err(ApiError::not_found(
+            "There is no agent credential to revoke.",
+        ));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -830,7 +847,9 @@ async fn put_ai_access(
     access::remember_policy(
         &state.data_dir,
         access::PolicyEntry {
-            container_id: container_id.clone(),
+            // The engine's id, not the form the caller used: one container
+            // must not end up with a short-id and a full-id entry.
+            container_id: live.canonical_id(&container_id).to_string(),
             endpoint_id: endpoint.id.clone(),
             container_name: live.name.clone(),
             state: requested,
@@ -887,17 +906,17 @@ async fn list_proposals(
     browser_only(&principal)?;
     access::expire_proposals(&state.data_dir, access::now());
     let mut items = access::load_proposals(&state.data_dir).map_err(ApiError::daemon)?;
-    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
     Ok(Json(Items { items }))
 }
 
 fn decide_error(error: access::DecideError) -> ApiError {
     match error {
         access::DecideError::Missing => ApiError::not_found("That proposal was not found."),
-        access::DecideError::Expired => ApiError::gone("That proposal expired before it was decided."),
-        access::DecideError::Conflict => {
-            ApiError::conflict("That proposal was already decided.")
+        access::DecideError::Expired => {
+            ApiError::gone("That proposal expired before it was decided.")
         }
+        access::DecideError::Conflict => ApiError::conflict("That proposal was already decided."),
     }
 }
 
@@ -990,10 +1009,7 @@ async fn propose(
 
 /// Re-run every check against live state, then (and only then) act. An agent
 /// proposal is a request, not an authorization.
-async fn execute_proposal(
-    state: &AppState,
-    proposal: &access::Proposal,
-) -> Result<(), ApiError> {
+async fn execute_proposal(state: &AppState, proposal: &access::Proposal) -> Result<(), ApiError> {
     let endpoint = require_docker(state, &proposal.endpoint_id)?;
     let container_id = proposal.container_id.clone().unwrap_or_default();
     match proposal.action.as_str() {
@@ -1056,10 +1072,13 @@ async fn execute_proposal(
             let value = access_for(state, &endpoint.id, &source, &live).await;
             require_access_operate(&value)?;
             let reachable = reachable_map(state, &endpoint.id).await;
+            // The proposal keeps no values, so the live source is the authority
+            // for what the copy inherits and for the refusal set.
+            let source_config = docker::container_config(&source).await?;
             let mutation = access::Mutation::from_edits(
-                body.env.as_deref().unwrap_or_default(),
-                body.labels.as_deref().unwrap_or_default(),
-                body.mounts.as_deref().unwrap_or_default(),
+                &source_config.env,
+                &source_config.labels,
+                &source_config.mounts,
             );
             refusal_for(state, &mutation, &reachable)?;
             let name = docker::checked_container_name(&body.name)?;
@@ -1067,10 +1086,10 @@ async fn execute_proposal(
                 image: body.image,
                 command: body.command,
                 entrypoint: body.entrypoint,
-                env: body.env,
-                labels: body.labels,
+                env: None,
+                labels: None,
                 ports: body.ports,
-                mounts: body.mounts,
+                mounts: None,
                 restart: body.restart_policy,
             };
             let created = docker::duplicate_or_replace(&source, &name, &edits).await?;
@@ -1117,7 +1136,10 @@ async fn execute_proposal(
         "stack-update" => {
             let body: StackBody = serde_json::from_value(proposal.payload.clone())
                 .map_err(|_| ApiError::validation("The proposed stack is not valid."))?;
-            let project = proposal.project.clone().unwrap_or_else(|| body.project.clone());
+            let project = proposal
+                .project
+                .clone()
+                .unwrap_or_else(|| body.project.clone());
             stack_guard(state, &endpoint.id, &project, true).await?;
             let reachable = reachable_map(state, &endpoint.id).await;
             let mutation = access::mutation_from_compose(&body.compose);
@@ -1636,6 +1658,29 @@ async fn delete_stack(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// The agent never receives environment values, label values or mount sources,
+/// whatever state it holds: Operate adds proposals, not a view of secrets.
+fn redact_detail_for_agent(principal: &Principal, detail: &mut docker::ContainerDetail) {
+    if principal.is_agent() {
+        access::redact_detail(detail);
+    }
+}
+
+fn redact_config_for_agent(principal: &Principal, config: &mut docker::ContainerConfigOut) {
+    if principal.is_agent() {
+        access::redact_config(config);
+    }
+}
+
+/// A volume mountpoint is a host filesystem path, so the agent does not see it.
+fn redact_volumes_for_agent(principal: &Principal, items: &mut [docker::VolumeOut]) {
+    if principal.is_agent() {
+        for item in items {
+            item.mountpoint.clear();
+        }
+    }
+}
+
 async fn container_detail(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -1647,10 +1692,8 @@ async fn container_detail(
     if principal.is_agent() {
         let value = container_access(&state, &endpoint.id, container_id).await?;
         require_access_read(&value)?;
-        if !value.state.allows_operate() {
-            access::redact_detail(&mut detail);
-        }
     }
+    redact_detail_for_agent(&principal, &mut detail);
     Ok(Json(detail))
 }
 
@@ -2026,10 +2069,8 @@ async fn container_config(
     if principal.is_agent() {
         let value = container_access(&state, &endpoint.id, container_id).await?;
         require_access_read(&value)?;
-        if !value.state.allows_operate() {
-            access::redact_config(&mut config);
-        }
     }
+    redact_config_for_agent(&principal, &mut config);
     Ok(Json(config))
 }
 
@@ -2213,11 +2254,13 @@ async fn recreate_container(
 
 async fn list_volumes(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ListPage<docker::VolumeOut>>, ApiError> {
     require_docker(&state, &id)?;
-    let items = docker::list_volumes(query.q.as_deref().unwrap_or("")).await?;
+    let mut items = docker::list_volumes(query.q.as_deref().unwrap_or("")).await?;
+    redact_volumes_for_agent(&principal, &mut items);
     Ok(Json(page_of(items, &query)?))
 }
 
@@ -2507,6 +2550,211 @@ mod console_tests {
         let error = result.unwrap_err();
         assert_eq!(error.code, "validation");
         assert_eq!(error.message, "The stack name cannot be changed.");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn agent() -> Principal {
+        Principal::Agent {
+            credential_id: "agt_test".to_string(),
+        }
+    }
+
+    fn browser() -> Principal {
+        Principal::Browser {
+            username: "operator".to_string(),
+        }
+    }
+
+    fn policy_entry(
+        id: &str,
+        name: &str,
+        state: access::State,
+        updated_at: u64,
+    ) -> access::PolicyEntry {
+        access::PolicyEntry {
+            container_id: id.to_string(),
+            endpoint_id: "endpoint-1".to_string(),
+            container_name: name.to_string(),
+            state,
+            updated_at,
+            updated_by: "operator".to_string(),
+        }
+    }
+
+    fn detail_with_secrets() -> docker::ContainerDetail {
+        docker::ContainerDetail {
+            id: "c1".into(),
+            name: "web".into(),
+            image: "nginx".into(),
+            image_id: "sha256:1".into(),
+            state: "running".into(),
+            status_text: "Up".into(),
+            created: String::new(),
+            started: None,
+            command: String::new(),
+            entrypoint: String::new(),
+            restart_policy: String::new(),
+            restart_maximum_retry_count: None,
+            ports: Vec::new(),
+            mounts: vec![docker::MountOut {
+                source: "/srv/secret".into(),
+                destination: "/data".into(),
+                mode: "rw".into(),
+            }],
+            networks: Vec::new(),
+            env: vec![docker::EnvOut {
+                key: "PISCES_PASSWORD".into(),
+                value: "hunter2".into(),
+            }],
+            labels: vec![docker::LabelOut {
+                key: "owner".into(),
+                value: "secret-label".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn agent_detail_and_config_are_redacted_even_at_operate() {
+        let mut detail = detail_with_secrets();
+        redact_detail_for_agent(&agent(), &mut detail);
+        assert!(detail.env.is_empty());
+        assert!(detail.labels.is_empty());
+        assert_eq!(detail.mounts[0].source, "");
+        assert_eq!(detail.mounts[0].destination, "/data");
+
+        let mut config = docker::ContainerConfigOut {
+            name: "web".into(),
+            image: "nginx".into(),
+            command: Vec::new(),
+            entrypoint: Vec::new(),
+            env: vec![docker::EnvOut {
+                key: "PISCES_PASSWORD".into(),
+                value: "hunter2".into(),
+            }],
+            labels: vec![docker::LabelOut {
+                key: "owner".into(),
+                value: "secret-label".into(),
+            }],
+            ports: Vec::new(),
+            restart_policy: "no".into(),
+            networks: Vec::new(),
+            mounts: vec![docker::MountEdit {
+                source: "/srv/secret".into(),
+                destination: "/data".into(),
+                mount_type: "bind".into(),
+                read_only: false,
+            }],
+        };
+        redact_config_for_agent(&agent(), &mut config);
+        assert!(config.env.is_empty());
+        assert!(config.labels.is_empty());
+        assert!(config.mounts.is_empty());
+
+        // The operator keeps the full view.
+        let mut detail = detail_with_secrets();
+        redact_detail_for_agent(&browser(), &mut detail);
+        assert_eq!(detail.env[0].value, "hunter2");
+        assert_eq!(detail.labels[0].value, "secret-label");
+        assert_eq!(detail.mounts[0].source, "/srv/secret");
+    }
+
+    #[test]
+    fn agent_volume_listings_hide_host_mountpoints() {
+        let volume = || docker::VolumeOut {
+            name: "data".into(),
+            driver: "local".into(),
+            mountpoint: "/var/lib/docker/volumes/data/_data".into(),
+            created: String::new(),
+        };
+        let mut items = vec![volume()];
+        redact_volumes_for_agent(&agent(), &mut items);
+        assert_eq!(items[0].mountpoint, "");
+        let mut items = vec![volume()];
+        redact_volumes_for_agent(&browser(), &mut items);
+        assert_eq!(items[0].mountpoint, "/var/lib/docker/volumes/data/_data");
+    }
+
+    /// QA repro A through the handler gate: the policy file an older build left
+    /// behind holds a stale Operate under a short id and a newer Locked under the
+    /// full id. The agent's read and its action both refuse.
+    #[tokio::test]
+    async fn a_stale_grant_for_a_duplicate_id_form_does_not_open_a_locked_container() {
+        let (state, dir) = stack_test_state();
+        let full = "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0";
+        let entries = vec![
+            policy_entry(&full[..12], "web", access::State::Operate, 10),
+            policy_entry(full, "web", access::State::Locked, 20),
+        ];
+        std::fs::write(
+            dir.join("ai_policy.json"),
+            serde_json::to_string(&entries).unwrap(),
+        )
+        .unwrap();
+        let live = access::LiveAccess {
+            name: "web".into(),
+            id: full.into(),
+            ..Default::default()
+        };
+        let value = access_for(&state, "endpoint-1", &full[..12], &live).await;
+        assert_eq!(value.state, access::State::Locked);
+        assert_eq!(
+            require_access_read(&value).unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            require_access_operate(&value).unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// QA repro B through the handler gate: the container was removed and
+    /// recreated outside Pisces, so its name is back with a new id. The grant
+    /// the operator set on the old id must not follow the name.
+    #[tokio::test]
+    async fn a_recreated_container_with_a_reused_name_starts_locked() {
+        let (state, dir) = stack_test_state();
+        access::remember_policy(
+            &dir,
+            policy_entry("aaa111", "web", access::State::Operate, 10),
+        )
+        .unwrap();
+        let live = access::LiveAccess {
+            name: "web".into(),
+            id: "bbb222".into(),
+            ..Default::default()
+        };
+        let value = access_for(&state, "endpoint-1", "bbb222", &live).await;
+        assert_eq!(value.state, access::State::Locked);
+        assert_eq!(
+            require_access_read(&value).unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        drop(state);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A forced lock still wins over a stored grant.
+    #[tokio::test]
+    async fn a_forced_lock_still_beats_a_stored_operate_grant() {
+        let (state, dir) = stack_test_state();
+        access::remember_policy(&dir, policy_entry("c1", "web", access::State::Operate, 10))
+            .unwrap();
+        let live = access::LiveAccess {
+            name: "web".into(),
+            id: "c1".into(),
+            mount_sources: vec!["/var/run/docker.sock".into()],
+            ..Default::default()
+        };
+        let value = access_for(&state, "endpoint-1", "c1", &live).await;
+        assert_eq!(value.state, access::State::Locked);
+        assert!(value.forced);
+        assert_eq!(
+            require_access_operate(&value).unwrap_err().status,
+            StatusCode::FORBIDDEN
+        );
+        drop(state);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
