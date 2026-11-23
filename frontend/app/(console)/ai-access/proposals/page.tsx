@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api } from "../../../../lib/api";
 import { atTime, clock, left } from "../../../../lib/format";
 import { unifiedDiff, type DiffLine } from "../../../../lib/diff";
+import { effectiveFields } from "../../../../lib/proposal-view";
 import type { Proposal, StackDetail } from "../../../../lib/types";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../components/bits";
 import { AiAccessTabs } from "../../../../components/ai-access-tabs";
@@ -224,6 +225,10 @@ function ReviewDialog({
   const project = proposal.project ?? payload.project ?? "";
   const environment = endpoints.find((endpoint) => endpoint.id === proposal.endpointId)?.name ?? proposal.endpointId;
   const name = proposal.containerName ?? project ?? proposal.containerId ?? "";
+  const fields = effectiveFields(proposal.action, proposal.payload);
+  const rows =
+    proposal.action === "duplicate" && name ? [{ label: "Source container", value: name }, ...fields] : fields;
+  const replacesSource = proposal.action === "duplicate" && name !== "" && name === String((proposal.payload as { name?: unknown } | undefined)?.name ?? "");
 
   useEffect(() => {
     if (!stack || !payload.compose) return;
@@ -280,6 +285,19 @@ function ReviewDialog({
           <div className="fact"><span>Requested by</span><strong className="mono">{proposal.credentialId ?? "agent credential"}</strong></div>
           <div className="fact"><span>Proposal ID</span><strong className="mono">{proposal.id}</strong></div>
         </div>
+        {rows.length > 0 ? (
+          <>
+            <h3>What will run</h3>
+            <div className="facts">
+              {rows.map((field) => (
+                <div className="fact" key={field.label}>
+                  <span>{field.label}</span>
+                  <strong className="mono" style={{ whiteSpace: "pre-wrap" }}>{field.value}</strong>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : null}
         {stack ? (
           <>
             <h3>Compose changes</h3>
@@ -301,8 +319,17 @@ function ReviewDialog({
         ) : null}
         {proposal.action === "duplicate" ? (
           <p className="ai-help">
-            The copy inherits the source container&apos;s environment, labels, and mounts. Values the
-            agent proposed in those fields are not used, and are not stored with the proposal.
+            The copy inherits the source container&apos;s environment, labels, and mounts. Pisces
+            rejects agent-proposed values for those fields, and never stores one.
+            {replacesSource
+              ? " The new name is the source's own name, so Pisces replaces the source container in place."
+              : ""}
+          </p>
+        ) : null}
+        {proposal.action === "recreate" && !stack ? (
+          <p className="ai-help">
+            Pisces stops the container, starts a replacement from its current configuration under the
+            same name, and removes the original only once the replacement is running.
           </p>
         ) : null}
         {decided ? (
