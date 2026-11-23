@@ -1234,6 +1234,7 @@ pub fn live_access_from(inspected: &ContainerInspectResponse) -> crate::access::
         }
     }
     crate::access::LiveAccess {
+        id: inspected.id.clone().unwrap_or_default(),
         name: inspected_name(inspected),
         mount_sources,
         volume_names,
@@ -1364,8 +1365,8 @@ pub async fn recreate_container(
 
     // Release published ports before creating the replacement, but keep the old
     // container available under a temporary name until the new one is healthy.
-    if was_running {
-        if timed_for(
+    if was_running
+        && timed_for(
             std::time::Duration::from_secs(stop_grace + 5),
             docker.stop_container(
                 &id,
@@ -1377,14 +1378,13 @@ pub async fn recreate_container(
         )
         .await
         .is_err()
-        {
-            if ensure_container_running(&docker, &id).await.is_err() {
-                return Err(recreate_recovery_error());
-            }
-            return Err(ApiError::daemon(
-                "Recreate failed; the original container remains in place.",
-            ));
+    {
+        if ensure_container_running(&docker, &id).await.is_err() {
+            return Err(recreate_recovery_error());
         }
+        return Err(ApiError::daemon(
+            "Recreate failed; the original container remains in place.",
+        ));
     }
     let rename = RenameContainerOptionsBuilder::new().name(&backup).build();
     if timed(docker.rename_container(&id, rename)).await.is_err() {

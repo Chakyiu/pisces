@@ -48,6 +48,35 @@ The backend accepts either form of the password. `PISCES_PASSWORD_HASH` (an argo
 
 Pushes to `main` publish `ghcr.io/chakyiu/pisces:latest` and `ghcr.io/chakyiu/pisces:sha-<short>`. A `vX.Y.Z` git tag also publishes that version and `X.Y`.
 
+## AI access
+
+The AI access screens issue an agent credential and set a policy for each container. The
+browser session remains unrestricted by these policies.
+
+Pisces allows one agent credential at a time. It is valid for 8 hours; Pisces shows the secret
+only when issued and stores a verifier, not the secret. Store the credential in the agent's own
+configuration, not in a container environment variable, Docker label, or shared log. Revoking it
+immediately stops agent API calls and rejects pending proposals without changing container
+policies or the browser session.
+
+Each container has one of three policies:
+
+| Policy | Agent access |
+| --- | --- |
+| **Locked** (default) | One list row with the container name, state, image, and ports. No logs, details, or actions. |
+| **Read** | Logs and non-secret details. Environment values, label values, mount paths, and the console are hidden; the agent cannot change anything. |
+| **Operate** | Read access plus requests for start, stop, restart, settings, duplicate, recreate, and stack apply. These actions are proposals; the agent does not call Docker to apply them. |
+
+An operator reviews proposals in the browser and confirms or rejects them. Proposals expire after
+one hour and can be decided only once. For stack proposals, Pisces re-checks services and mounts
+when the operator confirms. Agent responses omit environment values, label values, mount sources,
+and volume mountpoints in every policy state.
+
+Pisces forces a container to Locked when it has high-risk host access, including a Docker socket
+or named pipe, the host root, or the Pisces data directory. Other forced-lock conditions include
+privileged mode, host PID/network/IPC namespaces, attached host devices, or disabled security
+profiles. Read and Operate cannot be selected while a forced lock applies.
+
 ## Layout
 
 ```

@@ -114,6 +114,18 @@ impl ApiError {
         }
     }
 
+    /// Pisces could not read or write its own storage. Fail closed: the caller
+    /// learns the request was not recorded rather than that it was.
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "storage_unavailable",
+            message: message.into(),
+            retryable: true,
+            message_is_safe: true,
+        }
+    }
+
     pub fn deploy(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
