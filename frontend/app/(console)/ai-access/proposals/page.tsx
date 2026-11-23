@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api } from "../../../../lib/api";
 import { atTime, clock, left } from "../../../../lib/format";
 import { unifiedDiff, type DiffLine } from "../../../../lib/diff";
-import { effectiveFields } from "../../../../lib/proposal-view";
+import { duplicateEffect, effectiveFields } from "../../../../lib/proposal-view";
 import type { Proposal, StackDetail } from "../../../../lib/types";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../components/bits";
 import { AiAccessTabs } from "../../../../components/ai-access-tabs";
@@ -221,14 +221,18 @@ function ReviewDialog({
   const [diffError, setDiffError] = useState("");
   const decided = proposal.status !== "pending";
   const stack = STACK_ACTIONS.has(proposal.action);
-  const payload = (proposal.payload ?? {}) as { project?: string; compose?: string };
+  const payload = (proposal.payload ?? {}) as { project?: string; compose?: string; name?: unknown };
   const project = proposal.project ?? payload.project ?? "";
   const environment = endpoints.find((endpoint) => endpoint.id === proposal.endpointId)?.name ?? proposal.endpointId;
   const name = proposal.containerName ?? project ?? proposal.containerId ?? "";
   const fields = effectiveFields(proposal.action, proposal.payload);
+  // The source is identified by its recorded id: the name is only a display
+  // value, and an older proposal record may not carry one.
+  const sourceName = (proposal.containerName ?? "").trim();
+  const source = sourceName || proposal.containerId || "not recorded";
+  const effect = duplicateEffect(proposal.containerName, proposal.containerId, payload.name);
   const rows =
-    proposal.action === "duplicate" && name ? [{ label: "Source container", value: name }, ...fields] : fields;
-  const replacesSource = proposal.action === "duplicate" && name !== "" && name === String((proposal.payload as { name?: unknown } | undefined)?.name ?? "");
+    proposal.action === "duplicate" ? [{ label: "Source container", value: source }, ...fields] : fields;
 
   useEffect(() => {
     if (!stack || !payload.compose) return;
@@ -321,9 +325,11 @@ function ReviewDialog({
           <p className="ai-help">
             The copy inherits the source container&apos;s environment, labels, and mounts. Pisces
             rejects agent-proposed values for those fields, and never stores one.
-            {replacesSource
-              ? " The new name is the source's own name, so Pisces replaces the source container in place."
-              : ""}
+            {effect === "replace"
+              ? ` The new name matches the source container's name, so Pisces replaces ${source} in place.`
+              : effect === "replace-unknown-source"
+                ? ` Pisces replaces ${source} in place if the new name matches it, ignoring case. This proposal does not record the source's name, so check that the new name is not the same.`
+                : ""}
           </p>
         ) : null}
         {proposal.action === "recreate" && !stack ? (

@@ -100,10 +100,40 @@ function mountsOf(value: unknown): string[] {
   });
 }
 
+/** Every published port on this daemon is bound to all interfaces, so the bind
+ * address is rendered instead of left implicit: the operator is approving the
+ * exposure, not just the number. */
+const ALL_INTERFACES = "0.0.0.0";
+
+function withProtocol(value: string): string {
+  return value.includes("/") ? value : `${value}/tcp`;
+}
+
+/** A duplicate's port line, in the forms `docker::parse_port_line` accepts. */
+function publishLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) return "";
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("expose:")) {
+    return `${withProtocol(trimmed.slice("expose:".length).trim())} (exposed only, not published)`;
+  }
+  if (lower.startsWith("auto:")) {
+    return `${ALL_INTERFACES}:<random> → ${withProtocol(trimmed.slice("auto:".length).trim())}`;
+  }
+  const parts = trimmed.split(":");
+  if (parts.length === 2) {
+    return `${ALL_INTERFACES}:${parts[0]} → ${withProtocol(parts[1])}`;
+  }
+  if (parts.length === 3) {
+    return `${parts[0]}:${parts[1]} → ${withProtocol(parts[2])}`;
+  }
+  return trimmed;
+}
+
 function portsOf(value: unknown): string {
   const lines = entries(value).flatMap((entry) => {
     if (typeof entry === "string") {
-      const line = entry.trim();
+      const line = publishLine(entry);
       return line ? [line] : [];
     }
     if (entry && typeof entry === "object") {
@@ -112,7 +142,8 @@ function portsOf(value: unknown): string {
       const host = port.host;
       const protocol = text(port.protocol) || "tcp";
       if (typeof container !== "number" && typeof container !== "string") return [];
-      return [`${host === undefined || host === null ? "auto" : String(host)} → ${String(container)}/${protocol}`];
+      const published = host === undefined || host === null ? "<random>" : String(host);
+      return [`${ALL_INTERFACES}:${published} → ${String(container)}/${protocol}`];
     }
     return [];
   });
@@ -140,6 +171,25 @@ function hiddenKeys(action: string, payload: Bag): ProposalField[] {
     .filter((key) => !known.has(key))
     .sort()
     .map((key) => ({ label: key, value: HIDDEN }));
+}
+
+/**
+ * What a duplicate does to the source container. Docker compares the requested
+ * name with the *live* name ignoring case, so this does too; the source is
+ * identified by its recorded id, never by a display-name fallback.
+ */
+export type DuplicateEffect = "copy" | "replace" | "replace-unknown-source";
+
+export function duplicateEffect(
+  containerName: string | null | undefined,
+  containerId: string | null | undefined,
+  proposedName: unknown,
+): DuplicateEffect {
+  const proposed = text(proposedName);
+  if (!proposed) return "copy";
+  const source = text(containerName);
+  if (!source) return text(containerId) ? "replace-unknown-source" : "copy";
+  return proposed.toLowerCase() === source.toLowerCase() ? "replace" : "copy";
 }
 
 /**
