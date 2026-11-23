@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { type KeyboardEvent, useEffect, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
 import type { ContainerDetail } from "../../../../../../lib/types";
@@ -13,6 +13,8 @@ import { ContainerDuplicateDialog } from "../../../../../../components/container
 import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
+
+type ContainerTab = "details" | "logs";
 
 export default function ContainerDetailPage() {
   const params = useParams<{ id: string; containerId: string }>();
@@ -52,6 +54,7 @@ function Body({
   onName: (name: string) => void;
 }) {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [detail, setDetail] = useState<ContainerDetail | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error" | "missing">("loading");
   const [message, setMessage] = useState("");
@@ -64,6 +67,25 @@ function Body({
   const [editOpen, setEditOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
+  const [tab, setTab] = useState<ContainerTab>(() => (searchParams.get("tab") === "logs" ? "logs" : "details"));
+
+  useEffect(() => {
+    setTab(searchParams.get("tab") === "logs" ? "logs" : "details");
+  }, [searchParams]);
+
+  function chooseTab(next: ContainerTab) {
+    setTab(next);
+    const base = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
+    router.replace(next === "logs" ? `${base}?tab=logs` : base);
+  }
+
+  function tabKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const next: ContainerTab = event.key === "Home" || event.key === "ArrowLeft" ? "details" : "logs";
+    chooseTab(next);
+    document.getElementById(`container-tab-${next}`)?.focus();
+  }
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -161,6 +183,37 @@ function Body({
   return (
     <div className="stack">
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
+      <div className="stack-tabs" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
+        <button
+          id="container-tab-details"
+          className="stack-tab"
+          type="button"
+          role="tab"
+          aria-selected={tab === "details"}
+          aria-controls="container-panel-details"
+          onClick={() => chooseTab("details")}
+        >
+          Details
+        </button>
+        <button
+          id="container-tab-logs"
+          className="stack-tab"
+          type="button"
+          role="tab"
+          aria-selected={tab === "logs"}
+          aria-controls="container-panel-logs"
+          onClick={() => chooseTab("logs")}
+        >
+          Logs
+        </button>
+      </div>
+      <section
+        id="container-panel-details"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-details"
+        hidden={tab !== "details"}
+      >
       <section className="widget">
         <h2>Actions</h2>
         <div className="widget-pad">
@@ -200,12 +253,6 @@ function Body({
           onClose={() => setConsoleOpen(false)}
         />
       ) : null}
-      <ContainerLogs
-        endpointId={endpointId}
-        containerId={containerId}
-        reload={reload}
-        defaultFollow={isRunning}
-      />
       <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
       <section className="widget">
         <h2>Status</h2>
@@ -232,6 +279,23 @@ function Body({
           <Fact label="Created" value={stamp(detail.created)} mono />
           <Fact label="Started" value={stamp(detail.started)} mono />
         </div>
+      </section>
+      </section>
+      <section
+        id="container-panel-logs"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-logs"
+        hidden={tab !== "logs"}
+      >
+        {tab === "logs" ? (
+          <ContainerLogs
+            endpointId={endpointId}
+            containerId={containerId}
+            reload={reload}
+            defaultFollow={isRunning}
+          />
+        ) : null}
       </section>
       {confirm ? (
         <Dialog title={`Remove ${detail.name}?`} onClose={() => setConfirm(false)}>
