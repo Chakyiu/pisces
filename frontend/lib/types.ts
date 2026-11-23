@@ -157,7 +157,11 @@ export type AgentCredential = {
   expiresAt: number;
   revokedAt: number | null;
   lastUsedAt: number | null;
-  state: "active" | "expired" | "revoked" | "none";
+  ttlSecs: number;
+  idleSecs: number;
+  idleDeadline: number | null;
+  accessTier: "read" | "operate";
+  state: "active" | "expired" | "revoked" | "idle" | "none";
 };
 
 export type IssuedCredential = AgentCredential & { secret: string };

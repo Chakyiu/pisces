@@ -16,7 +16,21 @@ use crate::docker::{ContainerConfigOut, ContainerDetail, EnvOut, LabelOut, Mount
 use crate::store::replace_file;
 
 pub const AGENT_PREFIX: &str = "pisces_agent_";
-pub const AGENT_CRED_SECS: u64 = 8 * 60 * 60;
+/// Absolute lifetimes an operator can choose at issue time. Anything else is rejected.
+pub const TTL_8H: u64 = 8 * 60 * 60;
+pub const TTL_24H: u64 = 24 * 60 * 60;
+pub const TTL_7D: u64 = 7 * 24 * 60 * 60;
+pub const TTL_30D: u64 = 30 * 24 * 60 * 60;
+/// Default absolute lifetime. The historical name of the 8-hour step.
+pub const AGENT_CRED_SECS: u64 = TTL_8H;
+/// Default idle window. `0` disables idle expiry.
+pub const DEFAULT_IDLE_SECS: u64 = TTL_7D;
+/// `last_used_at` is not rewritten on every authenticated request.
+pub const LAST_USED_THROTTLE_SECS: u64 = 60;
+pub const TTL_REJECTED: &str = "TTL must be one of 28800 (8h), 86400 (24h), 604800 (7d), or 2592000 (30d). Other durations are rejected.";
+pub const IDLE_REJECTED: &str = "Idle expiry must be 0 (disabled) or at most 2592000 seconds (30 days). Longer values are rejected.";
+pub const AGENT_ROUTE_DENY: &str = "The agent credential may not use this route.";
+pub const LONG_TTL_PROPOSAL_DENY: &str = "This credential's lifetime is longer than 24 hours, so it is limited to Read access and cannot create proposals.";
 pub const PROPOSAL_SECS: u64 = 60 * 60;
 /// How long a decided or expired proposal stays readable before it is dropped.
 pub const PROPOSAL_GRACE_SECS: u64 = 24 * 60 * 60;
@@ -121,7 +135,31 @@ pub struct CredentialRecord {
     pub revoked_at: Option<u64>,
     #[serde(default)]
     pub last_used_at: Option<u64>,
+    /// Chosen absolute lifetime. Absent on a record written before custom TTL:
+    /// the stored `expires_at` stays the lifetime, and nothing rewrites it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+    /// Idle window. `Some(0)` and `None` both mean disabled. `None` is a record
+    /// from before idle expiry existed, so loading it must not add a deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_secs: Option<u64>,
     pub issued_by: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessTier {
+    Read,
+    Operate,
+}
+
+impl AccessTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccessTier::Read => "read",
+            AccessTier::Operate => "operate",
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -132,6 +170,10 @@ pub struct CredentialView {
     pub expires_at: u64,
     pub revoked_at: Option<u64>,
     pub last_used_at: Option<u64>,
+    pub ttl_secs: u64,
+    pub idle_secs: u64,
+    pub idle_deadline: Option<u64>,
+    pub access_tier: AccessTier,
     pub state: &'static str,
 }
 
@@ -145,6 +187,38 @@ pub enum CredentialError {
     Rejected,
     Revoked,
     Expired,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IssueParams {
+    pub ttl_secs: u64,
+    pub idle_secs: u64,
+}
+
+impl Default for IssueParams {
+    fn default() -> Self {
+        Self {
+            ttl_secs: AGENT_CRED_SECS,
+            idle_secs: DEFAULT_IDLE_SECS,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum IssueError {
+    Invalid(&'static str),
+    Store(&'static str),
+}
+
+/// One writer at a time for the credential file. A last-use update must not
+/// replace a revoke or a newly issued record.
+static CREDENTIAL_LOCK: Mutex<()> = Mutex::new(());
+
+fn credential_guard() -> MutexGuard<'static, ()> {
+    CREDENTIAL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 fn credential_path(dir: &Path) -> PathBuf {
@@ -164,30 +238,96 @@ pub fn load_credential(dir: &Path) -> Option<CredentialRecord> {
     Some(record)
 }
 
+fn empty_credential_view() -> CredentialView {
+    CredentialView {
+        id: String::new(),
+        issued_at: 0,
+        expires_at: 0,
+        revoked_at: None,
+        last_used_at: None,
+        ttl_secs: 0,
+        idle_secs: 0,
+        idle_deadline: None,
+        access_tier: AccessTier::Read,
+        state: "none",
+    }
+}
+
+pub fn credential_lifetime_secs(record: &CredentialRecord) -> u64 {
+    let window = record.expires_at.saturating_sub(record.issued_at);
+    record.ttl_secs.map(|ttl| ttl.max(window)).unwrap_or(window)
+}
+
+pub fn access_tier(record: &CredentialRecord) -> AccessTier {
+    if credential_lifetime_secs(record) > TTL_24H {
+        AccessTier::Read
+    } else {
+        AccessTier::Operate
+    }
+}
+
+pub fn credential_may_operate(record: &CredentialRecord) -> bool {
+    access_tier(record) == AccessTier::Operate
+}
+
+/// `None` when idle expiry is disabled. Otherwise the deadline counted from the
+/// last successful use, or from issue time when the credential has never been used.
+pub fn idle_deadline(record: &CredentialRecord) -> Option<u64> {
+    let idle = record.idle_secs.unwrap_or(0);
+    if idle == 0 {
+        return None;
+    }
+    let start = record.last_used_at.unwrap_or(record.issued_at);
+    Some(start.saturating_add(idle))
+}
+
+fn credential_state(record: &CredentialRecord, now: u64) -> &'static str {
+    if record.revoked_at.is_some() {
+        "revoked"
+    } else if record.expires_at <= now {
+        "expired"
+    } else if idle_deadline(record).is_some_and(|deadline| deadline <= now) {
+        "idle"
+    } else {
+        "active"
+    }
+}
+
+fn view_from(record: CredentialRecord, now: u64) -> CredentialView {
+    CredentialView {
+        state: credential_state(&record, now),
+        ttl_secs: credential_lifetime_secs(&record),
+        idle_secs: record.idle_secs.unwrap_or(0),
+        idle_deadline: idle_deadline(&record),
+        access_tier: access_tier(&record),
+        id: record.id,
+        issued_at: record.issued_at,
+        expires_at: record.expires_at,
+        revoked_at: record.revoked_at,
+        last_used_at: record.last_used_at,
+    }
+}
+
 pub fn credential_view(dir: &Path, now: u64) -> CredentialView {
     match load_credential(dir) {
-        None => CredentialView {
-            id: String::new(),
-            issued_at: 0,
-            expires_at: 0,
-            revoked_at: None,
-            last_used_at: None,
-            state: "none",
-        },
-        Some(record) => CredentialView {
-            state: if record.revoked_at.is_some() {
-                "revoked"
-            } else if record.expires_at <= now {
-                "expired"
-            } else {
-                "active"
-            },
-            id: record.id,
-            issued_at: record.issued_at,
-            expires_at: record.expires_at,
-            revoked_at: record.revoked_at,
-            last_used_at: record.last_used_at,
-        },
+        None => empty_credential_view(),
+        Some(record) => view_from(record, now),
+    }
+}
+
+pub fn validate_ttl_secs(ttl: u64) -> Result<u64, &'static str> {
+    if matches!(ttl, TTL_8H | TTL_24H | TTL_7D | TTL_30D) {
+        Ok(ttl)
+    } else {
+        Err(TTL_REJECTED)
+    }
+}
+
+pub fn validate_idle_secs(idle: u64) -> Result<u64, &'static str> {
+    if idle <= TTL_30D {
+        Ok(idle)
+    } else {
+        Err(IDLE_REJECTED)
     }
 }
 
@@ -251,28 +391,45 @@ fn verifier_bytes(verifier: &str) -> [u8; 32] {
 }
 
 /// Issue a new credential. Any previous record is replaced in the same atomic
-/// write, so two valid credentials never exist at once.
-pub fn issue_credential(dir: &Path, issued_by: &str, now: u64) -> Result<IssuedCredential, String> {
+/// write, so two valid credentials never exist at once. A duration that is not
+/// one of the allowed steps is rejected here; it is not shortened to the ceiling.
+pub fn issue_credential(
+    dir: &Path,
+    issued_by: &str,
+    now: u64,
+    params: IssueParams,
+) -> Result<IssuedCredential, IssueError> {
+    let _guard = credential_guard();
+    let ttl_secs = validate_ttl_secs(params.ttl_secs).map_err(IssueError::Invalid)?;
+    let idle_secs = validate_idle_secs(params.idle_secs).map_err(IssueError::Invalid)?;
+    let expires_at = now
+        .checked_add(ttl_secs)
+        .ok_or(IssueError::Invalid(TTL_REJECTED))?;
     let mut raw = [0u8; 32];
     getrandom::fill(&mut raw)
-        .map_err(|_| "The agent credential could not be generated.".to_string())?;
+        .map_err(|_| IssueError::Store("The agent credential could not be generated."))?;
     let secret = format!("{AGENT_PREFIX}{}", base64url(&raw));
     let record = CredentialRecord {
         id: format!("agt_{}", crate::store::new_id()),
         verifier: verifier_for(&secret),
         issued_at: now,
-        expires_at: now + AGENT_CRED_SECS,
+        expires_at,
         revoked_at: None,
         last_used_at: None,
+        ttl_secs: Some(ttl_secs),
+        idle_secs: Some(idle_secs),
         issued_by: issued_by.to_string(),
     };
-    let text = serde_json::to_string_pretty(&record).map_err(|_| CREDENTIAL_MSG.to_string())?;
-    write_atomic(&credential_path(dir), &text, CREDENTIAL_MSG)?;
+    let text =
+        serde_json::to_string_pretty(&record).map_err(|_| IssueError::Store(CREDENTIAL_MSG))?;
+    write_atomic(&credential_path(dir), &text, CREDENTIAL_MSG)
+        .map_err(|_| IssueError::Store(CREDENTIAL_MSG))?;
     let view = credential_view(dir, now);
     Ok(IssuedCredential { view, secret })
 }
 
 pub fn revoke_credential(dir: &Path, now: u64) -> Result<bool, String> {
+    let _guard = credential_guard();
     let Some(mut record) = load_credential(dir) else {
         return Ok(false);
     };
@@ -289,6 +446,14 @@ pub fn revoke_credential(dir: &Path, now: u64) -> Result<bool, String> {
 /// digest comparison is constant time and every rejection before that step also
 /// spends the comparison so the response does not leak why it failed.
 pub fn verify_credential(dir: &Path, presented: &str) -> Result<CredentialRecord, CredentialError> {
+    verify_credential_at(dir, presented, now())
+}
+
+fn verify_credential_at(
+    dir: &Path,
+    presented: &str,
+    now: u64,
+) -> Result<CredentialRecord, CredentialError> {
     let record = load_credential(dir);
     let presented_digest = Sha256::digest(presented.as_bytes());
     let expected = match &record {
@@ -305,23 +470,43 @@ pub fn verify_credential(dir: &Path, presented: &str) -> Result<CredentialRecord
     if record.revoked_at.is_some() {
         return Err(CredentialError::Revoked);
     }
-    let now = now();
     if record.expires_at <= now {
         return Err(CredentialError::Expired);
+    }
+    if idle_deadline(&record).is_some_and(|deadline| deadline <= now) {
+        return Err(CredentialError::Idle);
     }
     Ok(record)
 }
 
-/// Best-effort `lastUsedAt`, throttled to one write per minute.
+/// Best-effort `lastUsedAt`, throttled so a busy agent is not one rewrite per
+/// request. The secret is not part of the record and is never written.
 pub fn touch_credential(dir: &Path, record: &CredentialRecord) {
-    let now = now();
+    touch_credential_at(dir, record, now());
+}
+
+fn touch_credential_at(dir: &Path, record: &CredentialRecord, now: u64) {
     if record
         .last_used_at
-        .is_some_and(|last| now.saturating_sub(last) < 60)
+        .is_some_and(|last| now.saturating_sub(last) < LAST_USED_THROTTLE_SECS)
     {
         return;
     }
-    let mut updated = record.clone();
+    let _guard = credential_guard();
+    let Some(mut updated) = load_credential(dir) else {
+        return;
+    };
+    // The caller's copy can be older than the file. Never resurrect a revoked
+    // or replaced credential, and never extend its expiry.
+    if updated.id != record.id || updated.revoked_at.is_some() {
+        return;
+    }
+    if updated
+        .last_used_at
+        .is_some_and(|last| now.saturating_sub(last) < LAST_USED_THROTTLE_SECS)
+    {
+        return;
+    }
     updated.last_used_at = Some(now);
     let Ok(text) = serde_json::to_string_pretty(&updated) else {
         return;
@@ -1417,6 +1602,56 @@ pub fn agent_route(method: &str, path: &str) -> RouteAccess {
     }
 }
 
+fn is_container_remove(method: &str, path: &str) -> bool {
+    if method != "DELETE" {
+        return false;
+    }
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    parts.len() == 5
+        && parts.first() == Some(&"api")
+        && parts.get(1) == Some(&"endpoints")
+        && parts.get(3) == Some(&"containers")
+}
+
+/// Why this authenticated agent call is refused, if it is. Read routes stay
+/// open. A lifetime over 24 hours cannot create proposals, and container remove
+/// is refused with that reason too. Every other denied route keeps the generic
+/// refusal, including credential issue, so a long-lived credential cannot mint
+/// the next one.
+pub fn agent_call_block(
+    method: &str,
+    path: &str,
+    record: &CredentialRecord,
+) -> Option<&'static str> {
+    let route = agent_route(method, path);
+    if !credential_may_operate(record)
+        && (route == RouteAccess::Mutate || is_container_remove(method, path))
+    {
+        return Some(LONG_TTL_PROPOSAL_DENY);
+    }
+    if route == RouteAccess::Deny {
+        return Some(AGENT_ROUTE_DENY);
+    }
+    None
+}
+
+pub fn ensure_can_propose(dir: &Path, credential_id: &str) -> Result<(), &'static str> {
+    let Some(record) = load_credential(dir) else {
+        return Err("This agent credential is no longer active.");
+    };
+    if record.id != credential_id || record.revoked_at.is_some() {
+        return Err("This agent credential is no longer active.");
+    }
+    let now = now();
+    if record.expires_at <= now || idle_deadline(&record).is_some_and(|deadline| deadline <= now) {
+        return Err("This agent credential is no longer active.");
+    }
+    if !credential_may_operate(&record) {
+        return Err(LONG_TTL_PROPOSAL_DENY);
+    }
+    Ok(())
+}
+
 // --- Tests --------------------------------------------------------------
 
 #[cfg(test)]
@@ -1440,7 +1675,7 @@ mod tests {
     #[test]
     fn secret_is_shown_once_and_stored_only_as_a_verifier() {
         let dir = test_dir();
-        let issued = issue_credential(&dir, "operator", now()).unwrap();
+        let issued = issue_credential(&dir, "operator", now(), IssueParams::default()).unwrap();
         assert!(issued.secret.starts_with(AGENT_PREFIX));
         assert_eq!(issued.secret.len(), AGENT_PREFIX.len() + 43);
         assert_eq!(issued.view.state, "active");
@@ -1462,8 +1697,8 @@ mod tests {
     #[test]
     fn issuing_again_revokes_the_previous_secret_atomically() {
         let dir = test_dir();
-        let first = issue_credential(&dir, "operator", now()).unwrap();
-        let second = issue_credential(&dir, "operator", now() + 1).unwrap();
+        let first = issue_credential(&dir, "operator", now(), IssueParams::default()).unwrap();
+        let second = issue_credential(&dir, "operator", now() + 1, IssueParams::default()).unwrap();
         assert_eq!(
             verify_credential(&dir, &first.secret).unwrap_err(),
             CredentialError::Rejected
@@ -1483,7 +1718,7 @@ mod tests {
     #[test]
     fn revocation_and_expiry_are_distinct_and_effective() {
         let dir = test_dir();
-        let issued = issue_credential(&dir, "operator", now()).unwrap();
+        let issued = issue_credential(&dir, "operator", now(), IssueParams::default()).unwrap();
         assert!(revoke_credential(&dir, now()).unwrap());
         assert_eq!(
             verify_credential(&dir, &issued.secret).unwrap_err(),
@@ -1493,7 +1728,7 @@ mod tests {
 
         fs::remove_dir_all(&dir).unwrap();
         fs::create_dir_all(&dir).unwrap();
-        let issued = issue_credential(&dir, "operator", 1000).unwrap();
+        let issued = issue_credential(&dir, "operator", 1000, IssueParams::default()).unwrap();
         assert_eq!(
             verify_credential(&dir, &issued.secret).unwrap_err(),
             CredentialError::Expired
@@ -1511,6 +1746,296 @@ mod tests {
             verify_credential(&dir, "pisces_agent_anything").unwrap_err(),
             CredentialError::Rejected
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn ttl_steps_are_the_only_accepted_durations() {
+        for ttl in [TTL_8H, TTL_24H, TTL_7D, TTL_30D] {
+            assert_eq!(validate_ttl_secs(ttl), Ok(ttl));
+        }
+        for ttl in [
+            0,
+            1,
+            TTL_8H - 1,
+            TTL_8H + 1,
+            TTL_24H + 1,
+            TTL_30D + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(validate_ttl_secs(ttl), Err(TTL_REJECTED));
+        }
+        assert_eq!(validate_idle_secs(0), Ok(0));
+        assert_eq!(validate_idle_secs(TTL_30D), Ok(TTL_30D));
+        assert_eq!(validate_idle_secs(TTL_30D + 1), Err(IDLE_REJECTED));
+
+        let dir = test_dir();
+        let issued_at = 1_700_000_000;
+        for (ttl, idle) in [(TTL_30D + 5, 0), (TTL_8H, TTL_30D + 1)] {
+            let rejected = issue_credential(
+                &dir,
+                "operator",
+                issued_at,
+                IssueParams {
+                    ttl_secs: ttl,
+                    idle_secs: idle,
+                },
+            );
+            assert!(rejected.is_err());
+            assert!(
+                !credential_path(&dir).exists(),
+                "a rejected duration must not be stored or clamped"
+            );
+        }
+        let mut last_secret = String::new();
+        for ttl in [TTL_8H, TTL_24H, TTL_7D, TTL_30D] {
+            let issued = issue_credential(
+                &dir,
+                "operator",
+                issued_at,
+                IssueParams {
+                    ttl_secs: ttl,
+                    idle_secs: 0,
+                },
+            )
+            .unwrap();
+            assert_eq!(issued.view.expires_at, issued_at + ttl);
+            assert_eq!(issued.view.ttl_secs, ttl);
+            assert_eq!(issued.view.idle_deadline, None);
+            let tier = if ttl > TTL_24H {
+                AccessTier::Read
+            } else {
+                AccessTier::Operate
+            };
+            assert_eq!(issued.view.access_tier, tier);
+            let raw = fs::read_to_string(credential_path(&dir)).unwrap();
+            assert!(!raw.contains(AGENT_PREFIX));
+            last_secret = issued.secret;
+        }
+        // Idle 0 does not invent a 7-day deadline on a 30-day credential.
+        assert!(verify_credential_at(&dir, &last_secret, issued_at + TTL_7D + 1).is_ok());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn absolute_expiry_follows_the_chosen_ttl() {
+        let dir = test_dir();
+        let issued_at = 1_700_000_000;
+        let issued = issue_credential(
+            &dir,
+            "operator",
+            issued_at,
+            IssueParams {
+                ttl_secs: TTL_24H,
+                idle_secs: TTL_7D,
+            },
+        )
+        .unwrap();
+        assert!(verify_credential_at(&dir, &issued.secret, issued_at + TTL_24H - 1).is_ok());
+        assert_eq!(
+            verify_credential_at(&dir, &issued.secret, issued_at + TTL_24H).unwrap_err(),
+            CredentialError::Expired
+        );
+        assert_eq!(credential_view(&dir, issued_at + TTL_24H).state, "expired");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn idle_expiry_stops_auth_and_last_use_is_throttled() {
+        let dir = test_dir();
+        let issued_at = 1_800_000_000;
+        let issued = issue_credential(
+            &dir,
+            "operator",
+            issued_at,
+            IssueParams {
+                ttl_secs: TTL_30D,
+                idle_secs: TTL_7D,
+            },
+        )
+        .unwrap();
+        assert_eq!(issued.view.idle_deadline, Some(issued_at + TTL_7D));
+        assert!(verify_credential_at(&dir, &issued.secret, issued_at + TTL_7D - 1).is_ok());
+        assert_eq!(
+            verify_credential_at(&dir, &issued.secret, issued_at + TTL_7D).unwrap_err(),
+            CredentialError::Idle
+        );
+        assert_eq!(credential_view(&dir, issued_at + TTL_7D).state, "idle");
+
+        let used_at = issued_at + 3 * 24 * 60 * 60;
+        let record = verify_credential_at(&dir, &issued.secret, used_at).unwrap();
+        touch_credential_at(&dir, &record, used_at);
+        let touched = load_credential(&dir).unwrap();
+        assert_eq!(touched.last_used_at, Some(used_at));
+        assert_eq!(touched.expires_at, issued_at + TTL_30D);
+        // The copy from before the write must not punch through the throttle.
+        touch_credential_at(&dir, &record, used_at + LAST_USED_THROTTLE_SECS - 1);
+        assert_eq!(load_credential(&dir).unwrap().last_used_at, Some(used_at));
+        touch_credential_at(&dir, &touched, used_at + LAST_USED_THROTTLE_SECS);
+        assert_eq!(
+            load_credential(&dir).unwrap().last_used_at,
+            Some(used_at + LAST_USED_THROTTLE_SECS)
+        );
+        let raw = fs::read_to_string(credential_path(&dir)).unwrap();
+        assert!(!raw.contains(AGENT_PREFIX));
+
+        let slid = used_at + LAST_USED_THROTTLE_SECS;
+        assert!(verify_credential_at(&dir, &issued.secret, slid + TTL_7D - 1).is_ok());
+        assert_eq!(
+            verify_credential_at(&dir, &issued.secret, slid + TTL_7D).unwrap_err(),
+            CredentialError::Idle
+        );
+        // A recent use does not move absolute expiry.
+        let current = load_credential(&dir).unwrap();
+        touch_credential_at(&dir, &current, issued_at + TTL_30D - 10);
+        assert_eq!(
+            verify_credential_at(&dir, &issued.secret, issued_at + TTL_30D).unwrap_err(),
+            CredentialError::Expired
+        );
+        assert!(!LONG_TTL_PROPOSAL_DENY.contains(AGENT_PREFIX));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn long_ttl_cannot_create_lifecycle_proposals() {
+        let dir = test_dir();
+        let at = now();
+        let short = issue_credential(
+            &dir,
+            "operator",
+            at,
+            IssueParams {
+                ttl_secs: TTL_24H,
+                idle_secs: 0,
+            },
+        )
+        .unwrap();
+        let short_record = load_credential(&dir).unwrap();
+        assert!(agent_call_block(
+            "POST",
+            "/api/endpoints/e1/containers/c1/restart",
+            &short_record
+        )
+        .is_none());
+        assert!(agent_call_block(
+            "POST",
+            "/api/endpoints/e1/containers/c1/stop",
+            &short_record
+        )
+        .is_none());
+        assert_eq!(
+            agent_call_block("DELETE", "/api/endpoints/e1/containers/c1", &short_record),
+            Some(AGENT_ROUTE_DENY)
+        );
+        assert_eq!(
+            agent_call_block("POST", "/api/agent/credential", &short_record),
+            Some(AGENT_ROUTE_DENY)
+        );
+        assert!(ensure_can_propose(&dir, &short.view.id).is_ok());
+
+        let long = issue_credential(
+            &dir,
+            "operator",
+            at,
+            IssueParams {
+                ttl_secs: TTL_7D,
+                idle_secs: TTL_7D,
+            },
+        )
+        .unwrap();
+        assert_eq!(long.view.access_tier, AccessTier::Read);
+        let long_record = load_credential(&dir).unwrap();
+        for (method, path) in [
+            ("POST", "/api/endpoints/e1/containers/c1/restart"),
+            ("POST", "/api/endpoints/e1/containers/c1/stop"),
+            ("POST", "/api/endpoints/e1/containers/c1/start"),
+            ("DELETE", "/api/endpoints/e1/containers/c1"),
+            ("POST", "/api/endpoints/e1/stacks"),
+            ("PUT", "/api/endpoints/e1/containers/c1/settings"),
+        ] {
+            assert_eq!(
+                agent_call_block(method, path, &long_record),
+                Some(LONG_TTL_PROPOSAL_DENY),
+                "{method} {path}"
+            );
+        }
+        assert!(
+            agent_call_block("GET", "/api/endpoints/e1/containers/c1/logs", &long_record).is_none()
+        );
+        assert_eq!(
+            agent_call_block("POST", "/api/agent/credential", &long_record),
+            Some(AGENT_ROUTE_DENY)
+        );
+        assert_eq!(
+            ensure_can_propose(&dir, &long.view.id),
+            Err(LONG_TTL_PROPOSAL_DENY)
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_credential_keeps_stored_expiry_and_gains_no_idle_deadline() {
+        let dir = test_dir();
+        let secret = "pisces_agent_anything";
+        let issued_at = 1_700_000_000u64;
+        let expires_at = issued_at + TTL_8H;
+        let legacy = serde_json::json!({
+            "id": "agt_legacy",
+            "verifier": verifier_for(secret),
+            "issuedAt": issued_at,
+            "expiresAt": expires_at,
+            "revokedAt": null,
+            "lastUsedAt": null,
+            "issuedBy": "operator"
+        });
+        fs::write(
+            credential_path(&dir),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+        let loaded = load_credential(&dir).unwrap();
+        assert_eq!(loaded.expires_at, expires_at);
+        assert_eq!(loaded.ttl_secs, None);
+        assert_eq!(loaded.idle_secs, None);
+        assert_eq!(access_tier(&loaded), AccessTier::Operate);
+        assert_eq!(idle_deadline(&loaded), None);
+        assert!(verify_credential_at(&dir, secret, expires_at - 1).is_ok());
+        assert_eq!(
+            verify_credential_at(&dir, secret, expires_at).unwrap_err(),
+            CredentialError::Expired
+        );
+        touch_credential_at(&dir, &loaded, issued_at + 10);
+        let after = load_credential(&dir).unwrap();
+        assert_eq!(after.expires_at, expires_at);
+        assert_eq!(after.ttl_secs, None);
+        assert_eq!(after.idle_secs, None);
+        assert_eq!(after.last_used_at, Some(issued_at + 10));
+        let raw = fs::read_to_string(credential_path(&dir)).unwrap();
+        assert!(!raw.contains("ttlSecs"));
+        assert!(!raw.contains("idleSecs"));
+        assert!(!raw.contains(AGENT_PREFIX));
+
+        let long_expiry = issued_at + TTL_30D;
+        let legacy_long = serde_json::json!({
+            "id": "agt_legacy",
+            "verifier": verifier_for(secret),
+            "issuedAt": issued_at,
+            "expiresAt": long_expiry,
+            "issuedBy": "operator"
+        });
+        fs::write(
+            credential_path(&dir),
+            serde_json::to_string_pretty(&legacy_long).unwrap(),
+        )
+        .unwrap();
+        let long = load_credential(&dir).unwrap();
+        assert_eq!(access_tier(&long), AccessTier::Read);
+        assert!(verify_credential_at(&dir, secret, issued_at + TTL_7D + 1).is_ok());
+        touch_credential_at(&dir, &long, issued_at + TTL_7D);
+        let raw = fs::read_to_string(credential_path(&dir)).unwrap();
+        assert!(!raw.contains("idleSecs"));
+        assert!(!raw.contains("ttlSecs"));
+        assert_eq!(load_credential(&dir).unwrap().expires_at, long_expiry);
         fs::remove_dir_all(dir).unwrap();
     }
 
