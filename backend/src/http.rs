@@ -195,6 +195,10 @@ struct CredentialOut {
     expires_at: u64,
     revoked_at: Option<u64>,
     last_used_at: Option<u64>,
+    ttl_secs: u64,
+    idle_secs: u64,
+    idle_deadline: Option<u64>,
+    access_tier: access::AccessTier,
     state: &'static str,
 }
 
@@ -229,8 +233,37 @@ fn credential_out(view: access::CredentialView) -> CredentialOut {
         expires_at: view.expires_at,
         revoked_at: view.revoked_at,
         last_used_at: view.last_used_at,
+        ttl_secs: view.ttl_secs,
+        idle_secs: view.idle_secs,
+        idle_deadline: view.idle_deadline,
+        access_tier: view.access_tier,
         state: view.state,
     }
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IssueBody {
+    #[serde(default)]
+    ttl_secs: Option<u64>,
+    #[serde(default)]
+    idle_secs: Option<u64>,
+}
+
+fn issue_params_from_body(body: &[u8]) -> Result<access::IssueParams, ApiError> {
+    if body.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return Ok(access::IssueParams::default());
+    }
+    let parsed: IssueBody = serde_json::from_slice(body)
+        .map_err(|_| ApiError::validation("The request body is not valid."))?;
+    let ttl_secs = parsed.ttl_secs.unwrap_or(access::AGENT_CRED_SECS);
+    let idle_secs = parsed.idle_secs.unwrap_or(access::DEFAULT_IDLE_SECS);
+    let ttl_secs = access::validate_ttl_secs(ttl_secs).map_err(ApiError::validation)?;
+    let idle_secs = access::validate_idle_secs(idle_secs).map_err(ApiError::validation)?;
+    Ok(access::IssueParams {
+        ttl_secs,
+        idle_secs,
+    })
 }
 
 fn take_json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
@@ -406,6 +439,11 @@ async fn require_auth(State(state): State<AppState>, mut req: Request, next: Nex
         let credential_id = match access::verify_credential(&state.data_dir, token) {
             Ok(record) => {
                 access::touch_credential(&state.data_dir, &record);
+                if let Some(message) =
+                    access::agent_call_block(req.method().as_str(), &path, &record)
+                {
+                    return ApiError::forbidden(message).into_response();
+                }
                 record.id
             }
             Err(access::CredentialError::Revoked) => {
@@ -418,14 +456,16 @@ async fn require_auth(State(state): State<AppState>, mut req: Request, next: Nex
                 return ApiError::unauthorized("This agent credential expired. Issue a new one.")
                     .into_response();
             }
+            Err(access::CredentialError::Idle) => {
+                return ApiError::unauthorized(
+                    "This agent credential was unused past its idle deadline. Issue a new one.",
+                )
+                .into_response();
+            }
             Err(access::CredentialError::Rejected) => {
                 return ApiError::unauthorized("Those credentials were rejected.").into_response();
             }
         };
-        if access::agent_route(req.method().as_str(), &path) == access::RouteAccess::Deny {
-            return ApiError::forbidden("The agent credential may not use this route.")
-                .into_response();
-        }
         req.extensions_mut()
             .insert(Principal::Agent { credential_id });
         return next.run(req).await;
@@ -763,15 +803,20 @@ async fn issue_credential(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     headers: HeaderMap,
+    body: String,
 ) -> Result<(StatusCode, Json<IssuedCredentialOut>), ApiError> {
     browser_only(&principal)?;
     same_origin_guard(&headers)?;
+    let params = issue_params_from_body(body.as_bytes())?;
     let issued_by = match &principal {
         Principal::Browser { username } => username.clone(),
         Principal::Agent { .. } => String::new(),
     };
-    let issued = access::issue_credential(&state.data_dir, &issued_by, access::now())
-        .map_err(ApiError::daemon)?;
+    let issued = access::issue_credential(&state.data_dir, &issued_by, access::now(), params)
+        .map_err(|error| match error {
+            access::IssueError::Invalid(message) => ApiError::validation(message),
+            access::IssueError::Store(message) => ApiError::daemon(message),
+        })?;
     Ok((
         StatusCode::CREATED,
         Json(IssuedCredentialOut {
@@ -1014,7 +1059,11 @@ async fn propose(
         ));
     }
     let issuer = match principal {
-        Principal::Agent { credential_id } => Some(credential_id.as_str()),
+        Principal::Agent { credential_id } => {
+            access::ensure_can_propose(&state.data_dir, credential_id)
+                .map_err(ApiError::forbidden)?;
+            Some(credential_id.as_str())
+        }
         Principal::Browser { .. } => None,
     };
     let proposal = access::create_proposal(&state.data_dir, request, issuer, access::now())
@@ -2477,6 +2526,37 @@ mod console_tests {
             recovery.message,
             "Recreate recovery incomplete: inspect container state before retrying."
         );
+    }
+
+    #[test]
+    fn credential_ttl_is_rejected_instead_of_clamped() {
+        let defaults = issue_params_from_body(b"").unwrap();
+        assert_eq!(defaults.ttl_secs, access::AGENT_CRED_SECS);
+        assert_eq!(defaults.idle_secs, access::DEFAULT_IDLE_SECS);
+        let spaced = issue_params_from_body(b" \n").unwrap();
+        assert_eq!(spaced.ttl_secs, access::TTL_8H);
+        let chosen = issue_params_from_body(br#"{"ttlSecs":604800,"idleSecs":0}"#).unwrap();
+        assert_eq!(chosen.ttl_secs, access::TTL_7D);
+        assert_eq!(chosen.idle_secs, 0);
+        let day = issue_params_from_body(br#"{"idleSecs":86400}"#).unwrap();
+        assert_eq!(day.ttl_secs, access::TTL_8H);
+        assert_eq!(day.idle_secs, 86_400);
+
+        for body in [
+            r#"{"ttlSecs":2592001}"#,
+            r#"{"ttlSecs":1}"#,
+            r#"{"ttlSecs":28800.5}"#,
+            r#"{"ttlSecs":"8h"}"#,
+            r#"{"ttlSecs":-1}"#,
+            r#"{"ttl":28800}"#,
+            r#"{"idleSecs":2592001}"#,
+            r#"{"ttlSecs":604800,"idleSecs":2592001}"#,
+        ] {
+            let error = issue_params_from_body(body.as_bytes())
+                .expect_err("oversized or unknown durations are rejected");
+            assert_eq!(error.status, StatusCode::BAD_REQUEST);
+            assert!(!error.message.contains(access::AGENT_PREFIX));
+        }
     }
 
     #[test]

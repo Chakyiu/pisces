@@ -53,11 +53,15 @@ Pushes to `main` publish `ghcr.io/chakyiu/pisces:latest` and `ghcr.io/chakyiu/pi
 The AI access screens issue an agent credential and set a policy for each container. The
 browser session remains unrestricted by these policies.
 
-Pisces allows one agent credential at a time. It is valid for 8 hours; Pisces shows the secret
-only when issued and stores a verifier, not the secret. Store the credential in the agent's own
-configuration, not in a container environment variable, Docker label, or shared log. Revoking it
-immediately stops agent API calls and rejects pending proposals without changing container
-policies or the browser session.
+Pisces allows one agent credential at a time. The operator chooses a lifetime when issuing it:
+8 hours (the default), 24 hours, 7 days, or 30 days. Idle expiry is separate and stops the
+credential after a stretch with no successful use (7 days by default; 0 disables it). A lifetime
+longer than 24 hours is limited to Read: restart, stop, remove, and other proposal-creating calls
+are refused. Pisces shows the secret only when issued and stores a verifier, not the secret.
+Store the credential in the agent's own configuration, not in a container environment variable,
+Docker label, or shared log. Revoking it immediately stops agent API calls and rejects pending
+proposals without changing container policies or the browser session. A credential file written
+before these choices keeps the expiry already stored on it.
 
 Each container has one of three policies:
 

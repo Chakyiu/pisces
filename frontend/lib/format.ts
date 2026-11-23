@@ -70,6 +70,11 @@ export function left(unix: number | null | undefined): string {
   if (seconds <= 0) return "expired";
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours >= 48) {
+    const days = Math.floor(hours / 24);
+    const remaining = hours % 24;
+    return remaining > 0 ? `in ${days}d ${remaining}h` : `in ${days}d`;
+  }
   if (hours >= 1) return `in ${hours}h ${minutes}m`;
   return `in ${minutes}m`;
 }
