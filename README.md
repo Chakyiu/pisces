@@ -77,6 +77,19 @@ or named pipe, the host root, or the Pisces data directory. Other forced-lock co
 privileged mode, host PID/network/IPC namespaces, attached host devices, or disabled security
 profiles. Read and Operate cannot be selected while a forced lock applies.
 
+### MCP for agents
+
+Two stdio MCP servers ship in this repo. Pick the path that matches how the agent should work:
+
+| Server | Path | Use when |
+| --- | --- | --- |
+| **Pisces AI** | `skills/pisces/server.mjs` | The agent should use the **agent credential**, respect per-container policies, and queue **proposals** for operator approval. |
+| **Docker engine** | `skills/docker/server.mjs` | The agent should talk to the **local Docker HTTP API** directly (no Pisces login, no proposal queue). |
+
+Wire the Pisces AI server with `PISCES_AGENT_CREDENTIAL` set to the `pisces_agent_…` secret from
+**AI access**. See `skills/pisces/SKILL.md` for the full tool list and an example `.cursor/mcp.json`
+snippet.
+
 ## Layout
 
 ```
