@@ -7,7 +7,7 @@
 A Portainer-like web app for managing Docker from a browser: a **Next.js** frontend and a
 **Rust** backend that provides authenticated API control over the Docker daemon.
 
-The Docker slice (TELE-73) is the working console: sign in, add this machine's engine, and
+The Docker console is what ships today: sign in, add this machine's engine, and
 start, stop, inspect, and remove containers, plus images, volumes, and networks.
 Kubernetes is not delivered yet — the Kubernetes nav routes render a "not in this build"
 placeholder, and the only Kubernetes thing that works is saving a context.
