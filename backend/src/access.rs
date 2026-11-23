@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::docker::{ContainerConfigOut, ContainerDetail, EnvOut, LabelOut, MountEdit};
@@ -16,6 +18,10 @@ use crate::store::replace_file;
 pub const AGENT_PREFIX: &str = "pisces_agent_";
 pub const AGENT_CRED_SECS: u64 = 8 * 60 * 60;
 pub const PROPOSAL_SECS: u64 = 60 * 60;
+/// How long a decided or expired proposal stays readable before it is dropped.
+pub const PROPOSAL_GRACE_SECS: u64 = 24 * 60 * 60;
+/// Hard cap on stored proposals; the newest are kept.
+pub const PROPOSAL_KEEP: usize = 200;
 
 const CREDENTIAL_FILE: &str = "agent_credential.json";
 const POLICY_FILE: &str = "ai_policy.json";
@@ -24,6 +30,20 @@ const PROPOSAL_FILE: &str = "ai_proposals.json";
 const CREDENTIAL_MSG: &str = "The agent credential record could not be saved.";
 const POLICY_MSG: &str = "The AI access policy could not be saved.";
 const PROPOSAL_MSG: &str = "The proposal list could not be saved.";
+const PROPOSAL_READ_MSG: &str = "The proposal list could not be read.";
+const PROPOSAL_RECOVERY_MSG: &str =
+    "The confirmation was interrupted before it finished. Check the target's state before proposing again.";
+
+/// One writer at a time for the proposal file: every decision is a
+/// read-modify-write, so two concurrent confirms of one row would otherwise both
+/// see it pending and both execute.
+static PROPOSAL_LOCK: Mutex<()> = Mutex::new(());
+
+fn proposal_guard() -> MutexGuard<'static, ()> {
+    PROPOSAL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
 
 /// Who is making this request. The middleware is the only producer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +70,7 @@ pub fn now() -> u64 {
 }
 
 fn write_atomic(path: &Path, text: &str, message: &'static str) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
+    let tmp = temp_path(path);
     fs::write(&tmp, text).map_err(|_| message.to_string())?;
     #[cfg(unix)]
     {
@@ -58,6 +78,34 @@ fn write_atomic(path: &Path, text: &str, message: &'static str) -> Result<(), St
         let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
     }
     replace_file(&tmp, path).map_err(|_| message.to_string())
+}
+
+/// A temp name no other write can pick. The old fixed `json.tmp` name let two
+/// saves of the same file overwrite each other's staging file before the rename.
+fn temp_path(path: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "store".to_string());
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    path.with_file_name(format!(
+        ".{name}.{}.{seq}.{nanos:x}.tmp",
+        std::process::id()
+    ))
+}
+
+/// Names of the temp files `temp_path` can leave behind if a write is killed.
+fn temp_prefix(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "store".to_string());
+    format!(".{name}.")
 }
 
 // --- Credential ---------------------------------------------------------
@@ -1077,10 +1125,9 @@ pub fn load_proposals(dir: &Path) -> Result<Vec<Proposal>, String> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = fs::read_to_string(&path)
-        .map_err(|_| "The proposal list could not be read.".to_string())?;
-    let mut items: Vec<Proposal> = serde_json::from_str(&text)
-        .map_err(|_| "The proposal list could not be read.".to_string())?;
+    let text = fs::read_to_string(&path).map_err(|_| PROPOSAL_READ_MSG.to_string())?;
+    let mut items: Vec<Proposal> =
+        serde_json::from_str(&text).map_err(|_| PROPOSAL_READ_MSG.to_string())?;
     // Records written before payloads were sanitized are scrubbed on the way in
     // so nothing that reads a proposal can see a value that was stored once.
     for item in &mut items {
@@ -1162,12 +1209,24 @@ fn save_proposals(dir: &Path, proposals: &[Proposal]) -> Result<(), String> {
     write_atomic(&proposal_path(dir), &text, PROPOSAL_MSG)
 }
 
+/// Drop what nobody needs any more so the file — and the raw compose text a
+/// stack proposal carries — cannot grow for the life of the installation.
+fn prune_proposals(proposals: &mut Vec<Proposal>, now: u64) {
+    proposals.retain(|item| item.expires_at.saturating_add(PROPOSAL_GRACE_SECS) > now);
+    if proposals.len() > PROPOSAL_KEEP {
+        proposals.sort_by_key(|item| item.created_at);
+        let excess = proposals.len() - PROPOSAL_KEEP;
+        proposals.drain(..excess);
+    }
+}
+
 pub fn create_proposal(
     dir: &Path,
     request: ProposalRequest,
     issuer: Option<&str>,
     now: u64,
 ) -> Result<Proposal, String> {
+    let _guard = proposal_guard();
     let mut proposals = load_proposals(dir)?;
     let mut payload = request.payload;
     sanitize_payload(&mut payload);
@@ -1188,6 +1247,7 @@ pub fn create_proposal(
         message: None,
     };
     proposals.push(proposal.clone());
+    prune_proposals(&mut proposals, now);
     save_proposals(dir, &proposals)?;
     Ok(proposal)
 }
@@ -1197,10 +1257,14 @@ pub enum DecideError {
     Missing,
     Expired,
     Conflict,
+    /// The store could not be read or written. Fail closed rather than report a
+    /// decision that was never recorded.
+    Unavailable,
 }
 
 /// Atomically move a pending proposal to a decided state. Expiry is checked
-/// here, not only when the list is rendered.
+/// here, not only when the list is rendered, and the whole read-modify-write
+/// runs under one lock so a row can be decided exactly once.
 pub fn decide_proposal(
     dir: &Path,
     id: &str,
@@ -1209,7 +1273,8 @@ pub fn decide_proposal(
     now: u64,
     message: Option<String>,
 ) -> Result<Proposal, DecideError> {
-    let mut proposals = load_proposals(dir).map_err(|_| DecideError::Missing)?;
+    let _guard = proposal_guard();
+    let mut proposals = load_proposals(dir).map_err(|_| DecideError::Unavailable)?;
     let Some(index) = proposals.iter().position(|item| item.id == id) else {
         return Err(DecideError::Missing);
     };
@@ -1219,7 +1284,8 @@ pub fn decide_proposal(
     if proposals[index].expires_at <= now {
         proposals[index].status = ProposalStatus::Expired;
         proposals[index].decided_at = Some(now);
-        let _ = save_proposals(dir, &proposals);
+        prune_proposals(&mut proposals, now);
+        save_proposals(dir, &proposals).map_err(|_| DecideError::Unavailable)?;
         return Err(DecideError::Expired);
     }
     proposals[index].status = status;
@@ -1227,7 +1293,8 @@ pub fn decide_proposal(
     proposals[index].decided_at = Some(now);
     proposals[index].message = message.map(|text| text.chars().take(500).collect());
     let decided = proposals[index].clone();
-    save_proposals(dir, &proposals).map_err(|_| DecideError::Missing)?;
+    prune_proposals(&mut proposals, now);
+    save_proposals(dir, &proposals).map_err(|_| DecideError::Unavailable)?;
     Ok(decided)
 }
 
@@ -1237,16 +1304,19 @@ pub fn finish_proposal(
     status: ProposalStatus,
     message: Option<String>,
 ) -> Result<(), String> {
+    let _guard = proposal_guard();
     let mut proposals = load_proposals(dir)?;
     let Some(item) = proposals.iter_mut().find(|item| item.id == id) else {
         return Ok(());
     };
     item.status = status;
     item.message = message.map(|text| text.chars().take(500).collect());
+    prune_proposals(&mut proposals, now());
     save_proposals(dir, &proposals)
 }
 
 pub fn expire_proposals(dir: &Path, now: u64) {
+    let _guard = proposal_guard();
     let Ok(mut proposals) = load_proposals(dir) else {
         return;
     };
@@ -1258,8 +1328,50 @@ pub fn expire_proposals(dir: &Path, now: u64) {
             changed = true;
         }
     }
+    prune_proposals(&mut proposals, now);
     if changed {
         let _ = save_proposals(dir, &proposals);
+    }
+}
+
+/// Startup repair. A row left `confirmed` means the process died between the
+/// decision and its outcome, so its result is unknown: mark it failed rather
+/// than leave a state no reader can interpret. Pending rows past expiry are
+/// expired, retention is applied, and temp files from killed writes are removed.
+/// A store that cannot be read is reported, never rewritten.
+pub fn recover_proposals(dir: &Path, now: u64) -> Result<usize, String> {
+    let _guard = proposal_guard();
+    let mut proposals = load_proposals(dir)?;
+    let mut reconciled = 0;
+    for proposal in &mut proposals {
+        if proposal.status == ProposalStatus::Confirmed {
+            proposal.status = ProposalStatus::Failed;
+            proposal.message = Some(PROPOSAL_RECOVERY_MSG.to_string());
+            reconciled += 1;
+        } else if proposal.status == ProposalStatus::Pending && proposal.expires_at <= now {
+            proposal.status = ProposalStatus::Expired;
+            proposal.decided_at = Some(now);
+        }
+    }
+    prune_proposals(&mut proposals, now);
+    if proposal_path(dir).exists() {
+        save_proposals(dir, &proposals)?;
+    }
+    remove_temp_files(dir);
+    Ok(reconciled)
+}
+
+/// Best effort: a write that was killed leaves its staging file behind.
+fn remove_temp_files(dir: &Path) {
+    let prefix = temp_prefix(&proposal_path(dir));
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".tmp") {
+            let _ = fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -1751,6 +1863,143 @@ mod tests {
         );
         fs::write(proposal_path(&dir), "[broken").unwrap();
         assert!(load_proposals(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn request(action: &str) -> ProposalRequest {
+        ProposalRequest {
+            action: action.into(),
+            endpoint_id: "e1".into(),
+            container_id: Some("c1".into()),
+            container_name: Some("web".into()),
+            project: None,
+            payload: serde_json::json!({}),
+        }
+    }
+
+    /// Two confirms of one row reach the store together; exactly one may win.
+    #[test]
+    fn a_proposal_can_be_decided_only_once_under_concurrent_confirms() {
+        let dir = test_dir();
+        let proposal = create_proposal(&dir, request("start"), Some("agt"), 1000).unwrap();
+        let workers: Vec<_> = (0..8)
+            .map(|_| {
+                let dir = dir.clone();
+                let id = proposal.id.clone();
+                std::thread::spawn(move || {
+                    decide_proposal(&dir, &id, ProposalStatus::Confirmed, "operator", 1001, None)
+                })
+            })
+            .collect();
+        let results: Vec<Result<Proposal, DecideError>> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert_eq!(results.iter().filter(|item| item.is_ok()).count(), 1);
+        assert!(results
+            .iter()
+            .filter_map(|item| item.as_ref().err())
+            .all(|error| *error == DecideError::Conflict));
+        let listed = load_proposals(&dir).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, ProposalStatus::Confirmed);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Concurrent creation must not lose a row to a clobbered read-modify-write
+    /// or to the temp file two saves used to share.
+    #[test]
+    fn concurrent_creates_do_not_clobber_the_proposal_file() {
+        let dir = test_dir();
+        let workers: Vec<_> = (0..12)
+            .map(|index| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    create_proposal(&dir, request("start"), Some("agt"), 1000 + index).map(|_| ())
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        let listed = load_proposals(&dir).unwrap();
+        assert_eq!(listed.len(), 12);
+        let mut ids: Vec<String> = listed.iter().map(|item| item.id.clone()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 12);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_corrupt_store_fails_closed_instead_of_reporting_a_missing_row() {
+        let dir = test_dir();
+        fs::write(proposal_path(&dir), "[{").unwrap();
+        assert!(load_proposals(&dir).is_err());
+        assert_eq!(
+            decide_proposal(
+                &dir,
+                "prp_any",
+                ProposalStatus::Confirmed,
+                "operator",
+                1000,
+                None
+            )
+            .unwrap_err(),
+            DecideError::Unavailable
+        );
+        assert!(create_proposal(&dir, request("start"), None, 1000).is_err());
+        assert!(recover_proposals(&dir, 1000).is_err());
+        // The unreadable file is left untouched for a human to inspect.
+        assert_eq!(fs::read_to_string(proposal_path(&dir)).unwrap(), "[{");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn startup_recovery_settles_an_interrupted_confirmation() {
+        let dir = test_dir();
+        let proposal = create_proposal(&dir, request("start"), Some("agt"), 1000).unwrap();
+        decide_proposal(
+            &dir,
+            &proposal.id,
+            ProposalStatus::Confirmed,
+            "operator",
+            1001,
+            None,
+        )
+        .unwrap();
+        assert_eq!(recover_proposals(&dir, 1002).unwrap(), 1);
+        let listed = load_proposals(&dir).unwrap();
+        assert_eq!(listed[0].status, ProposalStatus::Failed);
+        assert!(listed[0]
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("interrupted"));
+        // A second start finds nothing to settle and replays nothing.
+        assert_eq!(recover_proposals(&dir, 1003).unwrap(), 0);
+        assert_eq!(
+            load_proposals(&dir).unwrap()[0].status,
+            ProposalStatus::Failed
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retention_drops_rows_past_grace_and_caps_the_file() {
+        let dir = test_dir();
+        let start = 10_000;
+        for index in 0..(PROPOSAL_KEEP as u64 + 5) {
+            create_proposal(&dir, request("start"), None, start + index).unwrap();
+        }
+        let listed = load_proposals(&dir).unwrap();
+        assert_eq!(listed.len(), PROPOSAL_KEEP);
+        let oldest = listed.iter().map(|item| item.created_at).min().unwrap();
+        assert_eq!(oldest, start + 5);
+        // Everything ends up past expiry plus grace, including retained compose.
+        let later = start + PROPOSAL_KEEP as u64 + PROPOSAL_SECS + PROPOSAL_GRACE_SECS + 10;
+        assert_eq!(recover_proposals(&dir, later).unwrap(), 0);
+        assert!(load_proposals(&dir).unwrap().is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 

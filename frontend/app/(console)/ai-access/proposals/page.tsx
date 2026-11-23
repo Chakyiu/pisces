@@ -299,6 +299,12 @@ function ReviewDialog({
             </p>
           </>
         ) : null}
+        {proposal.action === "duplicate" ? (
+          <p className="ai-help">
+            The copy inherits the source container&apos;s environment, labels, and mounts. Values the
+            agent proposed in those fields are not used, and are not stored with the proposal.
+          </p>
+        ) : null}
         {decided ? (
           <p>
             {proposal.status === "expired"

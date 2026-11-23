@@ -31,6 +31,15 @@ async fn main() {
         eprintln!("{message}");
         std::process::exit(1);
     });
+    // A proposal left `confirmed` means the last process stopped between the
+    // decision and its outcome. Settle those rows before serving, and drop what
+    // retention no longer keeps. A store that cannot be read is reported and
+    // left alone; the proposal routes then fail closed.
+    match access::recover_proposals(&data_dir, access::now()) {
+        Ok(0) => {}
+        Ok(settled) => println!("settled {settled} interrupted proposal(s)"),
+        Err(message) => eprintln!("{message}"),
+    }
     let state = http::AppState {
         auth,
         store: Arc::new(Mutex::new(store)),

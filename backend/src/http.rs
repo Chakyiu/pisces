@@ -146,7 +146,7 @@ struct ContainerSettingsBody {
     restart_maximum_retry_count: Option<i64>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct DuplicateBody {
     name: String,
     image: Option<String>,
@@ -905,7 +905,7 @@ async fn list_proposals(
 ) -> Result<Json<Items<access::Proposal>>, ApiError> {
     browser_only(&principal)?;
     access::expire_proposals(&state.data_dir, access::now());
-    let mut items = access::load_proposals(&state.data_dir).map_err(ApiError::daemon)?;
+    let mut items = access::load_proposals(&state.data_dir).map_err(ApiError::unavailable)?;
     items.sort_by_key(|item| std::cmp::Reverse(item.created_at));
     Ok(Json(Items { items }))
 }
@@ -917,6 +917,9 @@ fn decide_error(error: access::DecideError) -> ApiError {
             ApiError::gone("That proposal expired before it was decided.")
         }
         access::DecideError::Conflict => ApiError::conflict("That proposal was already decided."),
+        access::DecideError::Unavailable => ApiError::unavailable(
+            "The proposal queue could not be read or saved, so nothing was decided. Try again.",
+        ),
     }
 }
 
@@ -943,21 +946,33 @@ async fn confirm_proposal(
     .map_err(decide_error)?;
     match execute_proposal(&state, &proposal).await {
         Ok(()) => {
-            let _ = access::finish_proposal(
+            if access::finish_proposal(
                 &state.data_dir,
                 &proposal.id,
                 access::ProposalStatus::Applied,
                 None,
-            );
+            )
+            .is_err()
+            {
+                return Err(ApiError::unavailable(
+                    "The action ran, but the proposal queue could not be updated. Check the container state before doing anything else.",
+                ));
+            }
             Ok(Json(serde_json::json!({ "status": "applied" })))
         }
         Err(error) => {
-            let _ = access::finish_proposal(
+            if access::finish_proposal(
                 &state.data_dir,
                 &proposal.id,
                 access::ProposalStatus::Failed,
                 Some(error.message.clone()),
-            );
+            )
+            .is_err()
+            {
+                return Err(ApiError::unavailable(
+                    "The action failed and the proposal queue could not be updated. Check the container state before doing anything else.",
+                ));
+            }
             Err(error)
         }
     }
@@ -984,7 +999,7 @@ async fn reject_proposal(
         None,
     )
     .map_err(decide_error)?;
-    let _ = proposal;
+    drop(proposal);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1003,7 +1018,7 @@ async fn propose(
         Principal::Browser { .. } => None,
     };
     let proposal = access::create_proposal(&state.data_dir, request, issuer, access::now())
-        .map_err(ApiError::daemon)?;
+        .map_err(ApiError::unavailable)?;
     Ok((StatusCode::ACCEPTED, Json(proposal)).into_response())
 }
 
@@ -2143,16 +2158,26 @@ async fn duplicate_container(
     let endpoint = require_docker(&state, &id)?;
     let source = docker::object_ref(&container_id)?.to_string();
     if principal.is_agent() {
+        reject_agent_duplicate_values(&body)?;
         let live = docker::live_access(&source).await?;
         let value = access_for(&state, &endpoint.id, &source, &live).await;
         require_access_operate(&value)?;
         let reachable = reachable_map(&state, &endpoint.id).await;
+        // Confirm copies the source container's live values, so those are what
+        // the refusal set has to be checked against here as well.
+        let source_config = docker::container_config(&source).await?;
         let mutation = access::Mutation::from_edits(
-            body.env.as_deref().unwrap_or_default(),
-            body.labels.as_deref().unwrap_or_default(),
-            body.mounts.as_deref().unwrap_or_default(),
+            &source_config.env,
+            &source_config.labels,
+            &source_config.mounts,
         );
         refusal_for(&state, &mutation, &reachable)?;
+        let body = DuplicateBody {
+            env: None,
+            labels: None,
+            mounts: None,
+            ..body
+        };
         return propose(
             &state,
             &principal,
@@ -2184,6 +2209,15 @@ async fn duplicate_container(
         }
     }
     Ok((StatusCode::CREATED, Json(created)).into_response())
+}
+
+fn reject_agent_duplicate_values(body: &DuplicateBody) -> Result<(), ApiError> {
+    if body.env.is_some() || body.labels.is_some() || body.mounts.is_some() {
+        return Err(ApiError::conflict(
+            "A duplicate copies the source container's environment, labels, and mounts. Remove those fields from the request.",
+        ));
+    }
+    Ok(())
 }
 
 async fn apply_duplicate(
@@ -2656,6 +2690,50 @@ mod console_tests {
         assert_eq!(detail.env[0].value, "hunter2");
         assert_eq!(detail.labels[0].value, "secret-label");
         assert_eq!(detail.mounts[0].source, "/srv/secret");
+    }
+
+    #[test]
+    fn agent_duplicate_must_not_carry_values_it_would_not_use() {
+        let bare = DuplicateBody {
+            name: "web-copy".into(),
+            image: None,
+            command: None,
+            entrypoint: None,
+            env: None,
+            labels: None,
+            ports: None,
+            mounts: None,
+            restart_policy: None,
+        };
+        assert!(reject_agent_duplicate_values(&bare).is_ok());
+        for body in [
+            DuplicateBody {
+                env: Some(vec![docker::EnvOut {
+                    key: "MODE".into(),
+                    value: "prod".into(),
+                }]),
+                ..bare.clone()
+            },
+            DuplicateBody {
+                labels: Some(vec![docker::LabelOut {
+                    key: "owner".into(),
+                    value: "me".into(),
+                }]),
+                ..bare.clone()
+            },
+            DuplicateBody {
+                mounts: Some(vec![docker::MountEdit {
+                    source: "/srv/data".into(),
+                    destination: "/data".into(),
+                    mount_type: "bind".into(),
+                    read_only: false,
+                }]),
+                ..bare.clone()
+            },
+        ] {
+            let error = reject_agent_duplicate_values(&body).unwrap_err();
+            assert_eq!(error.status, StatusCode::CONFLICT);
+        }
     }
 
     #[test]
