@@ -87,7 +87,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
       <section className="widget">
         <div className="widget-head">
-          <div className="widget-title"><Icon name="networks" /> Networks</div>
           <input className="field search" placeholder="name" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
           <button className="btn primary" type="button" onClick={() => { setNetworkName(""); setDriver("bridge"); setCreate(true); }}>

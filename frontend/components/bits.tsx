@@ -35,6 +35,7 @@ export function Icon({ name }: { name: string }) {
     "eye-off": <><path d="M2 8s2.4-3.8 6-3.8S14 8 14 8s-2.4 3.8-6 3.8S2 8 2 8Z" /><circle cx="8" cy="8" r="1.6" /><path d="M3 13 13 3" /></>,
     copy: <><rect x="6" y="6" width="7" height="7" rx="1" /><path d="M10 6V4.2A1.2 1.2 0 0 0 8.8 3H4.2A1.2 1.2 0 0 0 3 4.2v4.6A1.2 1.2 0 0 0 4.2 10H6" /></>,
     console: <><rect x="2.5" y="3" width="11" height="10" rx="1" /><path d="m4.5 6 2 2-2 2M8 10h3" /></>,
+    settings: <><circle cx="8" cy="8" r="2.2" /><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.5 3.5l1.1 1.1M11.4 11.4l1.1 1.1M3.5 12.5l1.1-1.1M11.4 4.6l1.1-1.1" /></>,
   };
   return (
     <svg className="icon" viewBox="0 0 16 16" aria-hidden="true">
@@ -78,7 +79,7 @@ export function Loading({ noun }: { noun: string }) {
       <div className="skel" />
       <div className="skel" />
       <div className="skel" />
-      <p className="note">Loading {noun}</p>
+      <p className="note" role="status">Loading {noun}</p>
     </div>
   );
 }

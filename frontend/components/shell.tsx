@@ -4,7 +4,7 @@ import { createContext, useContext, useEffect, useRef, useState, type KeyboardEv
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api } from "../lib/api";
-import type { Endpoint } from "../lib/types";
+import type { Endpoint, Overview } from "../lib/types";
 import { useSession } from "./session";
 import { Gate, Icon, IconButton } from "./bits";
 
@@ -29,14 +29,16 @@ export function useConsole(): ConsoleValue {
   return value;
 }
 
-const DOCKER_NAV = [
-  { icon: "overview", label: "Dashboard", suffix: "" },
-  { icon: "stacks", label: "Stacks", suffix: "/stacks" },
-  { icon: "containers", label: "Containers", suffix: "/containers" },
-  { icon: "images", label: "Images", suffix: "/images" },
-  { icon: "networks", label: "Networks", suffix: "/networks" },
-  { icon: "volumes", label: "Volumes", suffix: "/volumes" },
-] as const;
+type NavCountKey = "containers" | "images" | "networks" | "volumes" | null;
+
+const DOCKER_NAV: { icon: string; label: string; suffix: string; countKey: NavCountKey }[] = [
+  { icon: "overview", label: "Dashboard", suffix: "", countKey: null },
+  { icon: "stacks", label: "Stacks", suffix: "/stacks", countKey: null },
+  { icon: "containers", label: "Containers", suffix: "/containers", countKey: "containers" },
+  { icon: "images", label: "Images", suffix: "/images", countKey: "images" },
+  { icon: "networks", label: "Networks", suffix: "/networks", countKey: "networks" },
+  { icon: "volumes", label: "Volumes", suffix: "/volumes", countKey: "volumes" },
+];
 
 const SIDEBAR_KEY = "pisces.sidebar.open";
 const USER_MENU_ID = "user-menu";
@@ -52,6 +54,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(true);
   const [overlay, setOverlay] = useState(false);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
+  const [navCounts, setNavCounts] = useState<Overview["counts"] | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -86,7 +89,6 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [session, router]);
 
   useEffect(() => {
-    // Initial open follows viewport. Stored false only keeps a wide desktop collapsed.
     const width = window.innerWidth;
     const stored = localStorage.getItem(SIDEBAR_KEY);
     setOpen(width >= 992 && stored !== "false");
@@ -106,6 +108,24 @@ export function Shell({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (window.innerWidth < 561) setOpen(false);
   }, [pathname]);
+
+  useEffect(() => {
+    if (!current || current.kind !== "docker") {
+      setNavCounts(null);
+      return;
+    }
+    let cancelled = false;
+    void api<Overview>(`/api/endpoints/${current.id}/overview`)
+      .then((body) => {
+        if (!cancelled && body && "counts" in body) setNavCounts(body.counts);
+      })
+      .catch(() => {
+        if (!cancelled) setNavCounts(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [current?.id, current?.kind]);
 
   if (session.status === "checking") return <Gate title="Checking session" />;
   if (session.status === "error") {
@@ -163,6 +183,12 @@ export function Shell({ children }: { children: ReactNode }) {
     });
   }
 
+  function navCount(key: NavCountKey) {
+    if (!key || !navCounts) return undefined;
+    if (key === "containers") return navCounts.containersRunning + navCounts.containersStopped;
+    return navCounts[key];
+  }
+
   const value: ConsoleValue = {
     username: session.username,
     endpoints,
@@ -176,7 +202,7 @@ export function Shell({ children }: { children: ReactNode }) {
     setCrumbs,
   };
 
-  const home = pathname === "/home" || pathname === "/endpoints";
+  const collapsed = !open;
 
   return (
     <ConsoleCtx.Provider value={value}>
@@ -184,37 +210,40 @@ export function Shell({ children }: { children: ReactNode }) {
         <aside className={`sidebar${open ? "" : " collapsed"}`}>
           <div className="brand">{open ? "Pisces" : "P"}</div>
           <nav className="nav" aria-label="Primary">
-            <NavLink href="/home" icon="home" label="Home" active={home} collapsed={!open} />
-            <EnvBlock current={current} collapsed={!open} />
+            <EnvSwitcher current={current} collapsed={collapsed} />
+            {current?.kind === "docker" ? (
+              <>
+                {open ? <div className="nav-group-label">Docker</div> : null}
+                {DOCKER_NAV.map((item) => {
+                  const href = `/e/${current.id}${item.suffix}`;
+                  const active = item.suffix === "" ? pathname === `/e/${current.id}` : pathname.startsWith(href);
+                  return (
+                    <NavLink
+                      key={item.label}
+                      href={href}
+                      icon={item.icon}
+                      label={item.label}
+                      active={active}
+                      collapsed={collapsed}
+                      count={navCount(item.countKey)}
+                    />
+                  );
+                })}
+              </>
+            ) : null}
             {current?.kind === "kubernetes" ? (
-              <K8sNav id={current.id} pathname={pathname} collapsed={!open} />
-            ) : current ? (
-              DOCKER_NAV.map((item) => {
-                const href = `/e/${current.id}${item.suffix}`;
-                const active = item.suffix === "" ? pathname === `/e/${current.id}` : pathname.startsWith(href);
-                return <NavLink key={item.label} href={href} icon={item.icon} label={item.label} active={active} collapsed={!open} />;
-              })
+              <>
+                {open ? <div className="nav-group-label">Kubernetes</div> : null}
+                <K8sNav id={current.id} pathname={pathname} collapsed={collapsed} />
+              </>
             ) : null}
           </nav>
-          <div className="sidebar-footer">{open ? "Pisces" : "P"}</div>
-        </aside>
-        <div className="main">
-          <header className="page-header">
-            <IconButton name="sidebar" label="Toggle sidebar" onClick={toggleSidebar} />
-            <span className="header-rule" aria-hidden="true" />
-            <nav className="crumbs" aria-label="Breadcrumb">
-              {crumbs.map((crumb, index) => (
-                <span key={`${crumb.label}-${index}`} className="crumb-item">
-                  {index > 0 ? <span className="crumb-sep">/</span> : null}
-                  {crumb.href ? (
-                    <Link href={crumb.href} className={crumb.mono ? "crumb-name" : "crumb"} translate={crumb.translate}>{crumb.label}</Link>
-                  ) : (
-                    <span className={crumb.mono ? "crumb-name" : "crumb"} translate={crumb.translate}>{crumb.label}</span>
-                  )}
-                </span>
-              ))}
-            </nav>
-            <div className="header-spacer" />
+          <div className="sidebar-footer">
+            <div className="footer-settings" aria-hidden={collapsed}>
+              <Icon name="settings" />
+              <span>Settings</span>
+              <span className="nav-soon">soon</span>
+            </div>
             <div className="popover">
               <button
                 ref={menuButtonRef}
@@ -245,6 +274,25 @@ export function Shell({ children }: { children: ReactNode }) {
                 </div>
               ) : null}
             </div>
+          </div>
+        </aside>
+        <div className="main">
+          <header className="page-header">
+            <IconButton name="sidebar" label="Toggle sidebar" onClick={toggleSidebar} />
+            <span className="header-rule" aria-hidden="true" />
+            <nav className="crumbs" aria-label="Breadcrumb">
+              {crumbs.map((crumb, index) => (
+                <span key={`${crumb.label}-${index}`} className="crumb-item">
+                  {index > 0 ? <span className="crumb-sep">/</span> : null}
+                  {crumb.href ? (
+                    <Link href={crumb.href} className={crumb.mono ? "crumb-name" : "crumb"} translate={crumb.translate}>{crumb.label}</Link>
+                  ) : (
+                    <span className={crumb.mono ? "crumb-name" : "crumb"} translate={crumb.translate}>{crumb.label}</span>
+                  )}
+                </span>
+              ))}
+            </nav>
+            <div className="header-spacer" />
           </header>
           <div className="content">{children}</div>
         </div>
@@ -255,12 +303,14 @@ export function Shell({ children }: { children: ReactNode }) {
 
 export function PageFrame({
   title,
+  count,
   crumbs,
   actions,
   onRefresh,
   children,
 }: {
   title: string;
+  count?: number;
   crumbs: Crumb[];
   actions?: ReactNode;
   onRefresh?: () => void;
@@ -276,7 +326,10 @@ export function PageFrame({
   return (
     <>
       <div className="title-row">
-        <h1>{title}</h1>
+        <h1>
+          {title}
+          {count != null ? <span className="count-pill">{count}</span> : null}
+        </h1>
         <div className="title-actions">
           {actions}
           {onRefresh ? <IconButton name="refresh" label="Refresh page" onClick={onRefresh} /> : null}
@@ -294,6 +347,9 @@ function NavLink({
   active,
   collapsed,
   nested,
+  count,
+  soon,
+  muted,
 }: {
   href: string;
   icon: string;
@@ -301,61 +357,61 @@ function NavLink({
   active: boolean;
   collapsed: boolean;
   nested?: boolean;
+  count?: number;
+  soon?: boolean;
+  muted?: boolean;
 }) {
   return (
     <Link
       href={href}
-      className={`${active ? "active" : ""}${nested ? " nested" : ""}`}
+      className={`${active ? "active" : ""}${nested ? " nested" : ""}${muted ? " muted-nav" : ""}`}
       aria-current={active ? "page" : undefined}
       aria-label={label}
       title={label}
     >
       <Icon name={icon} />
-      {collapsed ? null : <span>{label}</span>}
+      {collapsed ? null : (
+        <>
+          <span className="nav-label">{label}</span>
+          {count != null ? <span className="nav-count">{count}</span> : null}
+          {soon ? <span className="nav-soon">soon</span> : null}
+        </>
+      )}
     </Link>
   );
 }
 
-function EnvBlock({ current, collapsed }: { current?: Endpoint; collapsed: boolean }) {
-  const router = useRouter();
-  if (!current) {
-    return (
-      <div className="env-none" title="None selected" aria-label="None selected">
-        {collapsed ? null : <span>Environment:</span>}
-        <Icon name="slash" />
-        {collapsed ? null : <span>None selected</span>}
-      </div>
-    );
-  }
+function EnvSwitcher({ current, collapsed }: { current?: Endpoint; collapsed: boolean }) {
+  const label = current ? current.name : "Choose environment";
+  const icon = current ? (current.kind === "kubernetes" ? "kubernetes" : "docker") : "home";
   return (
-    <div className="env-current">
-      <span className="env-icon" title={current.name} aria-label={current.name}>
-        <Icon name={current.kind === "kubernetes" ? "kubernetes" : "docker"} />
-      </span>
-      {collapsed ? null : <span className="env-name" title={current.name}>{current.name}</span>}
-      <button
-        className="icon-btn"
-        type="button"
-        aria-label="Clear environment"
-        title="Clear environment"
-        onClick={() => router.push("/home")}
-      >
-        <Icon name="clear" />
-      </button>
-    </div>
+    <Link href="/home" className="env-switcher" aria-label={`Environment: ${label}`} title={label}>
+      <Icon name={icon} />
+      {collapsed ? null : (
+        <>
+          <span className="env-switcher-label">{label}</span>
+          <Icon name="chevron" />
+        </>
+      )}
+    </Link>
   );
 }
 
 function K8sNav({ id, pathname, collapsed }: { id: string; pathname: string; collapsed: boolean }) {
   const base = `/e/${id}`;
   const services = pathname.startsWith(`${base}/services`);
+  const items = [
+    { href: base, icon: "overview", label: "Dashboard", active: pathname === base },
+    { href: `${base}/workloads`, icon: "workloads", label: "Applications", active: pathname.startsWith(`${base}/workloads`) },
+    { href: `${base}/services`, icon: "networks", label: "Networking", active: false },
+  ];
   return (
     <>
-      <NavLink href={base} icon="overview" label="Dashboard" active={pathname === base} collapsed={collapsed} />
-      <NavLink href={`${base}/workloads`} icon="workloads" label="Applications" active={pathname.startsWith(`${base}/workloads`)} collapsed={collapsed} />
-      <NavLink href={`${base}/services`} icon="networks" label="Networking" active={false} collapsed={collapsed} />
+      {items.map((item) => (
+        <NavLink key={item.label} href={item.href} icon={item.icon} label={item.label} active={item.active} collapsed={collapsed} soon muted />
+      ))}
       {services ? (
-        <NavLink href={`${base}/services`} icon="services" label="Services" active collapsed={collapsed} nested={!collapsed} />
+        <NavLink href={`${base}/services`} icon="services" label="Services" active collapsed={collapsed} nested={!collapsed} soon muted />
       ) : null}
     </>
   );
