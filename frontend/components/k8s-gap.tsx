@@ -25,9 +25,10 @@ export function KubernetesGapBody({ title }: { title: string }) {
     );
   }
   return (
-    <div className="state">
-      <h2>Kubernetes control is not in this build</h2>
-      <p>The endpoint is saved. Lists and actions for {title.toLowerCase()} land in the next slice. Nothing was changed.</p>
+    <div className="state placeholder-panel">
+      <span className="badge warn"><i className="sq warn" />not in this build</span>
+      <h2>Pisces can save this cluster, but cannot list {title.toLowerCase()} yet</h2>
+      <p>The endpoint is saved as {current.name}. Lists and actions for {title.toLowerCase()} land in the next slice. Nothing was changed.</p>
     </div>
   );
 }

@@ -119,7 +119,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
       <section className="widget">
         <div className="widget-head">
-          <div className="widget-title"><Icon name="images" /> Images</div>
           <div className="grow" />
           <button className="btn danger" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => setRemove(selected)}>
             <Icon name="trash" /> Remove

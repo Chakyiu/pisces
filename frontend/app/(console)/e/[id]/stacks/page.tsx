@@ -98,7 +98,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
       <section className="widget">
         <div className="widget-head">
-          <div className="widget-title"><Icon name="stacks" /> Stacks</div>
           <input className="field search" placeholder="project name" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
           <div className="bulk">

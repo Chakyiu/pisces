@@ -1,0 +1,235 @@
+/* ============================================================================
+   Pisces design tokens — v1
+   Design gate GALA-43. Target: frontend/app/tokens.css, imported from
+   app/layout.tsx BEFORE globals.css.
+
+   Rule for implementation: after this lands, globals.css must contain no raw
+   hex, no raw px spacing, and no raw font-size. Every value comes from here.
+
+   Layers
+     1. Primitives   raw palette, never used directly in components
+     2. Semantic     what a thing IS (surface, border-strong, text-muted)
+     3. Scales       type, space, radius, shadow, motion, sizing
+     4. Base         the handful of element rules that belong with the tokens
+   ========================================================================= */
+
+/* --- 1. Primitives ------------------------------------------------------- */
+:root {
+  /* Cool neutral ramp. Hue held at ~218deg, chroma low, so greys never
+     turn muddy when a theme flips. */
+  --p-ink-950: #0a0e14;
+  --p-ink-900: #11161f;
+  --p-ink-800: #1a212c;
+  --p-ink-700: #232c39;
+  --p-ink-600: #2e3847;
+  --p-ink-500: #5a677c;
+  --p-ink-400: #7d8ca3;
+  --p-ink-300: #a7b4c8;
+  --p-ink-200: #cbd5e1;
+  --p-ink-100: #dce3ec;
+  --p-ink-050: #eef2f7;
+  --p-ink-025: #f5f7fa;
+  --p-white:   #ffffff;
+
+  --p-slate-900: #0f172a;
+  --p-slate-700: #42526b;
+  --p-slate-600: #5c6b82;
+  --p-slate-400: #7c8ba1;
+
+  /* Single brand accent. Amber is Pisces' existing identity — kept, but now
+     reserved: primary action, active nav marker, key metric. Nothing else. */
+  --p-amber-400: #ffc53d;
+  --p-amber-500: #ffb800;
+  --p-amber-700: #c98f00;
+  --p-amber-900: #8a5a00;
+  --p-amber-ink: #1a1200;
+
+  --p-green-400: #3dd68c;
+  --p-green-700: #0f7a4d;
+  --p-orange-400: #ffa64d;
+  --p-orange-700: #a35a00;
+  --p-red-400: #ff5c5c;
+  --p-red-700: #c62828;
+  --p-blue-400: #6fa8ff;
+  --p-blue-700: #1d4ed8;
+}
+
+/* --- 2. Semantic: dark (default) ----------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  --canvas: var(--p-ink-950);        /* page background behind everything   */
+  --surface: var(--p-ink-900);       /* panels, sidebar, header, table body */
+  --surface-raised: var(--p-ink-800); /* hover, skeleton, inset wells       */
+  --surface-active: var(--p-ink-700); /* pressed, selected row, active nav  */
+  --surface-inset: var(--p-ink-950);  /* log pane, code well, inside a card */
+
+  /* Two border tokens on purpose. --border is a divider and is allowed to be
+     quiet. --border-strong is the visible edge of a CONTROL and is pinned at
+     >= 3:1 against --surface (WCAG 1.4.11). The current build uses one weak
+     border for both, which is why inputs and buttons read as mush. */
+  --border: var(--p-ink-700);
+  --border-strong: var(--p-ink-500);
+
+  --text: #e6edf7;                   /* primary copy, headings              */
+  --text-secondary: var(--p-ink-300); /* labels, descriptions, fact keys    */
+  --text-muted: var(--p-ink-400);     /* captions, placeholders, timestamps */
+  --text-on-accent: var(--p-amber-ink);
+
+  --accent: var(--p-amber-500);      /* fills: primary button, active bar   */
+  --accent-hover: var(--p-amber-400);
+  --accent-text: var(--p-amber-500); /* accent used AS text or as a border  */
+
+  --success: var(--p-green-400);
+  --warning: var(--p-orange-400);
+  --danger: var(--p-red-400);
+  --danger-hover: #ff7b7b;
+  --focus: var(--p-blue-400);
+
+  --scrim: rgb(10 14 20 / 0.72);
+  --shadow-card: none;               /* dark elevation = surface step, not blur */
+  --shadow-pop: 0 8px 24px rgb(0 0 0 / 0.5);
+}
+
+/* --- 2b. Semantic: light -------------------------------------------------- */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --canvas: var(--p-ink-025);
+  --surface: var(--p-white);
+  --surface-raised: var(--p-ink-050);
+  --surface-active: #e2e8f1;
+  --surface-inset: var(--p-ink-025);
+
+  --border: var(--p-ink-100);
+  --border-strong: var(--p-slate-400);
+
+  --text: var(--p-slate-900);
+  --text-secondary: var(--p-slate-700);
+  --text-muted: var(--p-slate-600);
+  --text-on-accent: var(--p-amber-ink);
+
+  --accent: var(--p-amber-500);
+  --accent-hover: var(--p-amber-700);
+  --accent-text: var(--p-amber-900);  /* amber fails on white as text       */
+
+  --success: var(--p-green-700);
+  --warning: var(--p-orange-700);
+  --danger: var(--p-red-700);
+  --danger-hover: #a51f1f;
+  --focus: var(--p-blue-700);
+
+  --scrim: rgb(15 23 42 / 0.4);
+  --shadow-card: 0 1px 2px rgb(15 23 42 / 0.06), 0 1px 3px rgb(15 23 42 / 0.1);
+  --shadow-pop: 0 10px 28px rgb(15 23 42 / 0.16);
+}
+
+/* --- 3. Scales ------------------------------------------------------------ */
+:root {
+  /* Type. Base stays 14px — this is a dense operations console, not a
+     marketing site. What changes is that the steps are now distinct. */
+  --font-sans: var(--font-ui, "IBM Plex Sans"), "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-code, "JetBrains Mono"), ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --size-page: 20px;      --lh-page: 1.25;      --ls-page: -0.01em;
+  --size-section: 15px;   --lh-section: 1.3;
+  --size-body: 14px;      --lh-body: 1.5;
+  --size-mono: 13px;      --lh-mono: 1.55;  /* mono reads large; step down   */
+  --size-small: 12px;     --lh-small: 1.45;
+  --size-micro: 11px;     --lh-micro: 1.3;      --ls-micro: 0.06em;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* Space. 4px base. 2 / 6 / 10 / 28 are retired. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+
+  /* Radius. 1px and 2px are retired; 4px is only for things under ~24px tall. */
+  --radius-sm: 4px;       /* checkbox, status dot, inline tag               */
+  --radius: 6px;          /* button, field, card, table container           */
+  --radius-lg: 10px;      /* dialog, popover menu                           */
+  --radius-pill: 999px;   /* switch track, count pill                       */
+
+  /* Sizing */
+  --control-h: 36px;      /* desktop button / field / icon button           */
+  --control-h-touch: 44px; /* <=560px viewport, and every table row         */
+  --row-h: 44px;
+  --header-h: 56px;
+  --rail-w: 64px;         /* collapsed sidebar                              */
+  --sidebar-w: 248px;     /* expanded sidebar (was 300 — 52px back to data) */
+  --content-max: 1440px;
+
+  /* Motion */
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layer order, declared once so nothing guesses */
+  --z-sticky: 3;
+  --z-header: 8;
+  --z-sidebar: 6;
+  --z-popover: 20;
+  --z-modal: 40;
+}
+
+/* --- 4. Base -------------------------------------------------------------- */
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--size-body);
+  line-height: var(--lh-body);
+  font-weight: var(--weight-regular);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* One focus treatment for the whole app. Blue, not amber: amber is the
+   primary-action fill, and a focused secondary button must not look primary. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::placeholder { color: var(--text-muted); opacity: 1; }
+
+/* The only uppercase micro-label in the system. Permitted on exactly two
+   things: table column headers and badge text. Everywhere else — form
+   labels, fact keys, breadcrumbs, tile captions — use sentence case at
+   --size-small / --text-secondary. */
+.u-micro {
+  font-size: var(--size-micro);
+  line-height: var(--lh-micro);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--ls-micro);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.u-mono {
+  font-family: var(--font-mono);
+  font-size: var(--size-mono);
+  line-height: var(--lh-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

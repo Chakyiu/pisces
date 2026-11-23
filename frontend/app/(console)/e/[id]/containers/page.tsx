@@ -28,7 +28,7 @@ export default function ContainersPage() {
   const mounted = ready && current?.kind === "docker";
   return (
     <PageFrame
-      title="Container list"
+      title="Containers"
       crumbs={[{ label: "Containers" }]}
       onRefresh={mounted ? () => refreshRef.current?.() : undefined}
     >
@@ -111,7 +111,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
       <section className="widget">
         <div className="widget-head">
-          <div className="widget-title"><Icon name="containers" /> Containers</div>
           <input className="field search" placeholder="name or image" value={q} onChange={(event) => setQ(event.target.value)} />
           <select className="select" aria-label="State" value={state} onChange={(event) => { setState(event.target.value); setOffset(0); }} style={{ width: 140 }}>
             {STATES.map((item) => <option key={item} value={item}>{item === "all" ? "All" : item}</option>)}
