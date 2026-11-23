@@ -7,6 +7,7 @@ import { ApiError, api } from "../../../../../lib/api";
 import { age, portList } from "../../../../../lib/format";
 import type { Container } from "../../../../../lib/types";
 import { Badge, Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { AiAccessBadge } from "../../../../../components/container-ai-access";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
 
@@ -154,6 +155,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                   <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={toggleAll} /></label></th>
                   <th>Name</th>
                   <th>State</th>
+                  <th>AI access</th>
                   <th>Quick actions</th>
                   <th>Image</th>
                   <th>Created</th>
@@ -172,6 +174,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                       <Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link>
                     </td>
                     <td><Badge state={item.state} /></td>
+                    <td><AiAccessBadge access={item.aiAccess} /></td>
                     <td>
                       <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}/logs`} aria-label="Logs" title="Logs">
                         <Icon name="logs" />

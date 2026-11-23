@@ -6,6 +6,7 @@ import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
 import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
+import { ContainerAiAccess } from "../../../../../../components/container-ai-access";
 import { ContainerConsole } from "../../../../../../components/container-console";
 import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
 import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
@@ -198,6 +199,7 @@ function Body({
           onClose={() => setConsoleOpen(false)}
         />
       ) : null}
+      <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
       <section className="widget">
         <h2>Status</h2>
         <div className="facts">

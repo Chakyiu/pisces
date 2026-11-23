@@ -56,3 +56,20 @@ export function shortId(id: string): string {
 export function blank(value: string | null | undefined): string {
   return value && value.trim() ? value : "None";
 }
+
+/** An absolute wall-clock time from unix seconds. */
+export function atTime(unix: number | null | undefined): string {
+  if (!unix) return "—";
+  return new Date(unix * 1000).toLocaleString();
+}
+
+/** How long is left until a unix second timestamp. */
+export function left(unix: number | null | undefined): string {
+  if (!unix) return "—";
+  const seconds = unix - Math.floor(Date.now() / 1000);
+  if (seconds <= 0) return "expired";
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours >= 1) return `in ${hours}h ${minutes}m`;
+  return `in ${minutes}m`;
+}

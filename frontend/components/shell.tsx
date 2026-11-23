@@ -240,6 +240,7 @@ export function Shell({ children }: { children: ReactNode }) {
               {menu ? (
                 <div id={USER_MENU_ID} ref={menuRef} className="menu" role="menu" onKeyDown={onMenuKeyDown}>
                   <div className="menu-user" aria-hidden="true">{session.username}</div>
+                  <Link role="menuitem" tabIndex={-1} href="/ai-access" onClick={() => setMenu(false)}><Icon name="user" />AI access</Link>
                   <button type="button" role="menuitem" tabIndex={-1} onClick={() => void signOut()}><Icon name="sign-out" />Sign out</button>
                 </div>
               ) : null}
