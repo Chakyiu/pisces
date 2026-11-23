@@ -25,6 +25,17 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   if (cookie) headers.set("cookie", cookie);
   const contentType = req.headers.get("content-type");
   if (contentType) headers.set("content-type", contentType);
+  // An agent call can reach the API through this proxy too. The credential is
+  // forwarded, never logged (nothing here logs headers).
+  const authorization = req.headers.get("authorization");
+  if (authorization) headers.set("authorization", authorization);
+  // The Rust side compares Origin against Host for same-origin-only endpoints.
+  // Behind this proxy the upstream Host is the loopback address, so the browser
+  // host travels in x-forwarded-host.
+  const origin = req.headers.get("origin");
+  if (origin) headers.set("origin", origin);
+  const host = req.headers.get("host");
+  if (host) headers.set("x-forwarded-host", host);
 
   // Following logs is a long-lived stream: it must outlive the 10 s abort every
   // other call gets, or follow dies on a quiet container. The Rust side serves it

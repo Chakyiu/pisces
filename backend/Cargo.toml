@@ -23,5 +23,9 @@ jsonwebtoken = { version = "=12.0.0", features = ["rust_crypto"] }
 argon2 = "=0.6.0"
 futures-util = "0.3"
 
+# Agent credential: SHA-256 verifier digest and OS CSPRNG for the secret.
+sha2 = "=0.11.1"
+getrandom = "=0.3.4"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem"] }

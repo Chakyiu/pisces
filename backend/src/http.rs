@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, Query, Request, State};
+use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
+use crate::access::{self, Principal};
 use crate::auth::{self, AuthConfig};
 use crate::docker;
 use crate::error::ApiError;
@@ -30,6 +31,8 @@ pub struct AppState {
     pub auth: AuthConfig,
     pub store: Arc<Mutex<Store>>,
     pub stack_apply: Arc<StackApplyLocks>,
+    /// Endpoint list, agent credential, AI policy and proposals all live here.
+    pub data_dir: std::path::PathBuf,
 }
 
 type StackApplyLock = tokio::sync::Mutex<()>;
@@ -116,14 +119,14 @@ enum ConsoleMessage {
     Resize { width: u16, height: u16 },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RunBody {
     image: String,
     name: Option<String>,
     ports: Option<Vec<RunPortBody>>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct RunPortBody {
     host: u16,
     container: u16,
@@ -136,14 +139,14 @@ struct VolumeBody {
     driver: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ContainerSettingsBody {
     name: String,
     restart_policy: String,
     restart_maximum_retry_count: Option<i64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct DuplicateBody {
     name: String,
     image: Option<String>,
@@ -162,7 +165,7 @@ struct NetworkBody {
     driver: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct StackBody {
     project: String,
     compose: String,
@@ -182,6 +185,52 @@ struct StackView {
     container_details: Vec<docker::ContainerOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     compose: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CredentialOut {
+    id: String,
+    issued_at: u64,
+    expires_at: u64,
+    revoked_at: Option<u64>,
+    last_used_at: Option<u64>,
+    state: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IssuedCredentialOut {
+    /// Shown once, at issue time. It is not stored anywhere.
+    secret: String,
+    #[serde(flatten)]
+    credential: CredentialOut,
+}
+
+#[derive(Deserialize)]
+struct AiAccessBody {
+    state: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiAccessOut {
+    state: &'static str,
+    forced_locked: bool,
+    reason: String,
+    mount: Option<String>,
+    readable: bool,
+}
+
+fn credential_out(view: access::CredentialView) -> CredentialOut {
+    CredentialOut {
+        id: view.id,
+        issued_at: view.issued_at,
+        expires_at: view.expires_at,
+        revoked_at: view.revoked_at,
+        last_used_at: view.last_used_at,
+        state: view.state,
+    }
 }
 
 fn take_json<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, ApiError> {
@@ -293,10 +342,21 @@ pub fn router(state: AppState) -> Router {
             "/api/endpoints/{id}/networks",
             get(list_networks).post(create_network),
         )
-        .route(
-            "/api/endpoints/{id}/networks/{name}",
+        .route("/api/endpoints/{id}/networks/{name}",
             axum::routing::delete(delete_network),
         )
+        .route(
+            "/api/agent/credential",
+            get(get_credential).post(issue_credential).delete(revoke_credential),
+        )
+        .route(
+            "/api/ai-access/{id}/{container_id}",
+            get(get_ai_access).put(put_ai_access),
+        )
+        .route("/api/ai-access/{id}", get(list_ai_access))
+        .route("/api/proposals", get(list_proposals))
+        .route("/api/proposals/{id}/confirm", post(confirm_proposal))
+        .route("/api/proposals/{id}/reject", post(reject_proposal))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -313,20 +373,759 @@ async fn no_store(req: Request, next: Next) -> Response {
     response
 }
 
-async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let path = req.uri().path();
+async fn require_auth(
+    State(state): State<AppState>,
+    mut req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path().to_string();
     let public = path == "/api/health"
         || (path == "/api/session" && req.method() == axum::http::Method::POST);
     if public {
         return next.run(req).await;
     }
-    let Some(token) = auth::token_from_headers(req.headers()) else {
+
+    let cookie = auth::token_from_headers(req.headers());
+    let authorization = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .map(|value| value.to_str().unwrap_or_default().to_string());
+    if cookie.is_some() && authorization.is_some() {
+        return ApiError::unauthorized(
+            "Send either the session cookie or the agent credential, not both.",
+        )
+        .into_response();
+    }
+
+    if let Some(value) = authorization {
+        // Contract: strip a case-sensitive `Bearer ` prefix, then the token must
+        // carry the agent prefix. Nothing else is accepted on this header.
+        let token = value.strip_prefix("Bearer ").unwrap_or_default().trim();
+        if !token.starts_with(access::AGENT_PREFIX) {
+            return ApiError::unauthorized("Those credentials were rejected.").into_response();
+        }
+        let credential_id = match access::verify_credential(&state.data_dir, token) {
+            Ok(record) => {
+                access::touch_credential(&state.data_dir, &record);
+                record.id
+            }
+            Err(access::CredentialError::Revoked) => {
+                return ApiError::unauthorized(
+                    "This agent credential was revoked. Issue a new one.",
+                )
+                .into_response();
+            }
+            Err(access::CredentialError::Expired) => {
+                return ApiError::unauthorized(
+                    "This agent credential expired. Issue a new one.",
+                )
+                .into_response();
+            }
+            Err(access::CredentialError::Rejected) => {
+                return ApiError::unauthorized("Those credentials were rejected.").into_response();
+            }
+        };
+        if access::agent_route(req.method().as_str(), &path) == access::RouteAccess::Deny {
+            return ApiError::forbidden("The agent credential may not use this route.")
+                .into_response();
+        }
+        req.extensions_mut()
+            .insert(Principal::Agent { credential_id });
+        return next.run(req).await;
+    }
+
+    let Some(token) = cookie else {
         return ApiError::unauthorized("Sign in required.").into_response();
     };
-    if auth::username_from_token(&state.auth, &token).is_none() {
+    let Some(username) = auth::username_from_token(&state.auth, &token) else {
         return ApiError::unauthorized("Your session ended. Sign in again.").into_response();
-    }
+    };
+    req.extensions_mut().insert(Principal::Browser { username });
     next.run(req).await
+}
+
+fn browser_only(principal: &Principal) -> Result<(), ApiError> {
+    if principal.is_browser() {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(
+            "That is a browser-only route for the AI agent.",
+        ))
+    }
+}
+
+/// CSRF guard for cookie-authenticated writes. The Next proxy forwards the
+/// browser's Origin and its own `x-forwarded-host`, so a same-origin call
+/// compares equal while a cross-site one does not. Requests without an Origin
+/// are server-to-server and never carry the cookie.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uri>().ok())
+    else {
+        return true;
+    };
+    if !matches!(origin.scheme_str(), Some("http" | "https")) {
+        return false;
+    }
+    if origin
+        .path_and_query()
+        .is_some_and(|path| path.as_str() != "/")
+    {
+        return false;
+    }
+    let Some(authority) = origin.authority() else {
+        return false;
+    };
+    let matches = |candidate: Option<&str>| {
+        candidate.is_some_and(|host| authority.as_str().eq_ignore_ascii_case(host))
+    };
+    let host = headers.get(header::HOST).and_then(|value| value.to_str().ok());
+    let forwarded = headers
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok());
+    matches(host) || matches(forwarded)
+}
+
+fn same_origin_guard(headers: &HeaderMap) -> Result<(), ApiError> {
+    if same_origin(headers) {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden("Cross-origin request rejected."))
+    }
+}
+
+// --- AI access ----------------------------------------------------------
+
+struct AccessState {
+    state: access::State,
+    forced: bool,
+    reason: String,
+    mount: Option<String>,
+    readable: bool,
+}
+
+fn locked_access_error(value: &AccessState) -> ApiError {
+    let reason = if value.reason.is_empty() {
+        "This container is locked for the agent.".to_string()
+    } else {
+        format!(
+            "This container is locked for the agent because {}.",
+            value.reason
+        )
+    };
+    ApiError::forbidden(format!("The agent has no access. {reason}"))
+}
+
+fn require_access_read(value: &AccessState) -> Result<(), ApiError> {
+    if value.state.allows_read() {
+        Ok(())
+    } else {
+        Err(locked_access_error(value))
+    }
+}
+
+fn require_access_operate(value: &AccessState) -> Result<(), ApiError> {
+    if value.state.allows_operate() {
+        Ok(())
+    } else if value.state.allows_read() {
+        Err(ApiError::forbidden(
+            "This container is read-only for the agent. Change the policy to Operate first.",
+        ))
+    } else {
+        Err(locked_access_error(value))
+    }
+}
+
+fn ai_access_out(value: AccessState) -> AiAccessOut {
+    AiAccessOut {
+        state: if value.state.allows_operate() {
+            "operate"
+        } else if value.state.allows_read() {
+            "read"
+        } else {
+            "locked"
+        },
+        forced_locked: value.forced,
+        reason: value.reason,
+        mount: value.mount,
+        readable: value.readable,
+    }
+}
+
+/// Policy plus live forced lock. Forced lock always wins over the stored state.
+async fn access_for(
+    state: &AppState,
+    endpoint_id: &str,
+    id: &str,
+    live: &access::LiveAccess,
+) -> AccessState {
+    let policy = access::load_policy(&state.data_dir);
+    let forced = access::forced_lock(&state.data_dir, live);
+    if forced.locked {
+        return AccessState {
+            state: access::State::Locked,
+            forced: true,
+            reason: forced.reason,
+            mount: forced.mount,
+            readable: policy.readable,
+        };
+    }
+    let mut value = access::policy_state(&policy, endpoint_id, id, &live.name);
+    let mut reason = String::new();
+    if value.allows_read() {
+        if let Some(shared) = shared_reference_reason(state, endpoint_id, live).await {
+            value = access::State::Locked;
+            reason = shared;
+        }
+    }
+    AccessState {
+        state: value,
+        forced: false,
+        reason,
+        mount: None,
+        readable: policy.readable,
+    }
+}
+
+async fn container_access(
+    state: &AppState,
+    endpoint_id: &str,
+    id: &str,
+) -> Result<AccessState, ApiError> {
+    let live = docker::live_access(id).await?;
+    Ok(access_for(state, endpoint_id, id, &live).await)
+}
+
+/// `network_mode: container:x`, `volumes_from` and `links` inherit whatever the
+/// target can do. One level only: the target's own forced lock plus its policy.
+async fn shared_reference_reason(
+    state: &AppState,
+    endpoint_id: &str,
+    live: &access::LiveAccess,
+) -> Option<String> {
+    let mut targets: Vec<String> = Vec::new();
+    for mode in [live.network_mode.as_deref(), live.pid_mode.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(target) = mode.strip_prefix("container:") {
+            targets.push(target.to_string());
+        }
+    }
+    targets.extend(live.volumes_from.iter().cloned());
+    targets.extend(live.links.iter().cloned());
+    for target in targets {
+        let Some(value) = reference_state(state, endpoint_id, &target).await else {
+            return Some("it shares resources with a container the agent cannot resolve".into());
+        };
+        if !value.allows_operate() {
+            return Some(format!(
+                "it shares resources with {target}, which is {} for the agent",
+                value.as_str()
+            ));
+        }
+    }
+    None
+}
+
+async fn reference_state(
+    state: &AppState,
+    endpoint_id: &str,
+    target: &str,
+) -> Option<access::State> {
+    let target = target.split(':').next().unwrap_or(target);
+    let listed = docker::list_containers("", "").await.ok()?;
+    let found = listed.into_iter().find(|container| {
+        container.name == target || container.id == target || container.id.starts_with(target)
+    })?;
+    let live = docker::live_access(&found.id).await.ok()?;
+    let forced = access::forced_lock(&state.data_dir, &live);
+    if forced.locked {
+        return Some(access::State::Locked);
+    }
+    let policy = access::load_policy(&state.data_dir);
+    Some(access::policy_state(&policy, endpoint_id, &found.id, &found.name))
+}
+
+/// Every service in a stack must pass the same bar the agent needs for a single
+/// container. A stack is never a way around a per-container decision.
+async fn stack_guard(
+    state: &AppState,
+    endpoint_id: &str,
+    project: &str,
+    operate: bool,
+) -> Result<(), ApiError> {
+    let stack = docker::list_stacks("")
+        .await?
+        .into_iter()
+        .find(|stack| stack.project == project);
+    let Some(stack) = stack else {
+        return Ok(());
+    };
+    for container in stack.containers {
+        let live = docker::live_access(&container.id).await?;
+        let value = access_for(state, endpoint_id, &container.id, &live).await;
+        if operate {
+            require_access_operate(&value)?;
+        } else {
+            require_access_read(&value)?;
+        }
+    }
+    Ok(())
+}
+
+fn refusal_for(
+    state: &AppState,
+    mutation: &access::Mutation,
+    reachable: &std::collections::HashMap<String, access::State>,
+) -> Result<(), ApiError> {
+    let lookup = |target: &str| {
+        let key = target.split(':').next().unwrap_or(target);
+        reachable.get(key).copied().unwrap_or(access::State::Locked)
+    };
+    match access::refusal(&state.data_dir, mutation, &lookup) {
+        None => Ok(()),
+        Some(message) => Err(ApiError::forbidden(message)),
+    }
+}
+
+async fn reachable_map(state: &AppState, endpoint_id: &str) -> std::collections::HashMap<String, access::State> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(listed) = docker::list_containers("", "").await else {
+        return map;
+    };
+    for container in listed {
+        let Ok(live) = docker::live_access(&container.id).await else {
+            continue;
+        };
+        let value = access_for(state, endpoint_id, &container.id, &live).await;
+        map.insert(container.name.clone(), value.state);
+        map.insert(container.id.clone(), value.state);
+    }
+    map
+}
+
+async fn access_labels(
+    state: &AppState,
+    endpoint_id: &str,
+    items: &[docker::ContainerOut],
+) -> Vec<Option<docker::AiAccessLabel>> {
+    let mut labels = Vec::with_capacity(items.len());
+    for item in items {
+        let label = match docker::live_access(&item.id).await {
+            Ok(live) => {
+                let out = ai_access_out(access_for(state, endpoint_id, &item.id, &live).await);
+                Some(docker::AiAccessLabel {
+                    state: out.state.to_string(),
+                    forced_locked: out.forced_locked,
+                    reason: out.reason,
+                    mount: out.mount,
+                })
+            }
+            Err(_) => None,
+        };
+        labels.push(label);
+    }
+    labels
+}
+
+async fn get_credential(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<CredentialOut>, ApiError> {
+    browser_only(&principal)?;
+    Ok(Json(credential_out(access::credential_view(
+        &state.data_dir,
+        access::now(),
+    ))))
+}
+
+/// Issue the one live credential. A previous record is replaced atomically, so
+/// issuing again invalidates whatever the agent had.
+async fn issue_credential(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<IssuedCredentialOut>), ApiError> {
+    browser_only(&principal)?;
+    same_origin_guard(&headers)?;
+    let issued_by = match &principal {
+        Principal::Browser { username } => username.clone(),
+        Principal::Agent { .. } => String::new(),
+    };
+    let issued = access::issue_credential(&state.data_dir, &issued_by, access::now())
+        .map_err(ApiError::daemon)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(IssuedCredentialOut {
+            secret: issued.secret,
+            credential: credential_out(issued.view),
+        }),
+    ))
+}
+
+async fn revoke_credential(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    browser_only(&principal)?;
+    same_origin_guard(&headers)?;
+    let now = access::now();
+    let revoked = access::revoke_credential(&state.data_dir, now).map_err(ApiError::daemon)?;
+    if !revoked {
+        return Err(ApiError::not_found("There is no agent credential to revoke."));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_ai_access(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((id, container_id)): Path<(String, String)>,
+) -> Result<Json<AiAccessOut>, ApiError> {
+    browser_only(&principal)?;
+    let endpoint = require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?;
+    let value = container_access(&state, &endpoint.id, container_id).await?;
+    Ok(Json(ai_access_out(value)))
+}
+
+async fn put_ai_access(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((id, container_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Result<Json<AiAccessBody>, JsonRejection>,
+) -> Result<StatusCode, ApiError> {
+    browser_only(&principal)?;
+    same_origin_guard(&headers)?;
+    let body = take_json(body)?;
+    let requested = match body.state.trim() {
+        "locked" => access::State::Locked,
+        "read" => access::State::Read,
+        "operate" => access::State::Operate,
+        _ => {
+            return Err(ApiError::validation(
+                "State must be locked, read or operate.",
+            ))
+        }
+    };
+    let username = match &principal {
+        Principal::Browser { username } => username.clone(),
+        Principal::Agent { .. } => String::new(),
+    };
+    let endpoint = require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?.to_string();
+    let live = docker::live_access(&container_id).await?;
+    let forced = access::forced_lock(&state.data_dir, &live);
+    if forced.locked {
+        return Err(ApiError::conflict(format!(
+            "Forced lock: {}. Revoke the access on the host; the policy cannot override it.",
+            forced.reason
+        )));
+    }
+    access::remember_policy(
+        &state.data_dir,
+        access::PolicyEntry {
+            container_id: container_id.clone(),
+            endpoint_id: endpoint.id.clone(),
+            container_name: live.name.clone(),
+            state: requested,
+            updated_at: access::now(),
+            updated_by: username,
+        },
+    )
+    .map_err(ApiError::daemon)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiAccessItem {
+    container_id: String,
+    container_name: String,
+    state: &'static str,
+    forced_locked: bool,
+    reason: String,
+    mount: Option<String>,
+}
+
+async fn list_ai_access(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<String>,
+) -> Result<Json<Items<AiAccessItem>>, ApiError> {
+    browser_only(&principal)?;
+    let endpoint = require_docker(&state, &id)?;
+    let containers = docker::list_containers("", "").await?;
+    let mut items = Vec::new();
+    for container in containers {
+        let Ok(live) = docker::live_access(&container.id).await else {
+            continue;
+        };
+        let value = access_for(&state, &endpoint.id, &container.id, &live).await;
+        let out = ai_access_out(value);
+        items.push(AiAccessItem {
+            container_id: container.id.clone(),
+            container_name: container.name.clone(),
+            state: out.state,
+            forced_locked: out.forced_locked,
+            reason: out.reason,
+            mount: out.mount,
+        });
+    }
+    Ok(Json(Items { items }))
+}
+
+async fn list_proposals(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+) -> Result<Json<Items<access::Proposal>>, ApiError> {
+    browser_only(&principal)?;
+    access::expire_proposals(&state.data_dir, access::now());
+    let mut items = access::load_proposals(&state.data_dir).map_err(ApiError::daemon)?;
+    items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(Json(Items { items }))
+}
+
+fn decide_error(error: access::DecideError) -> ApiError {
+    match error {
+        access::DecideError::Missing => ApiError::not_found("That proposal was not found."),
+        access::DecideError::Expired => ApiError::gone("That proposal expired before it was decided."),
+        access::DecideError::Conflict => {
+            ApiError::conflict("That proposal was already decided.")
+        }
+    }
+}
+
+async fn confirm_proposal(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    browser_only(&principal)?;
+    same_origin_guard(&headers)?;
+    let username = match &principal {
+        Principal::Browser { username } => username.clone(),
+        Principal::Agent { .. } => String::new(),
+    };
+    let proposal = access::decide_proposal(
+        &state.data_dir,
+        &id,
+        access::ProposalStatus::Confirmed,
+        &username,
+        access::now(),
+        None,
+    )
+    .map_err(decide_error)?;
+    match execute_proposal(&state, &proposal).await {
+        Ok(()) => {
+            let _ = access::finish_proposal(
+                &state.data_dir,
+                &proposal.id,
+                access::ProposalStatus::Applied,
+                None,
+            );
+            Ok(Json(serde_json::json!({ "status": "applied" })))
+        }
+        Err(error) => {
+            let _ = access::finish_proposal(
+                &state.data_dir,
+                &proposal.id,
+                access::ProposalStatus::Failed,
+                Some(error.message.clone()),
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn reject_proposal(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    browser_only(&principal)?;
+    same_origin_guard(&headers)?;
+    let username = match &principal {
+        Principal::Browser { username } => username.clone(),
+        Principal::Agent { .. } => String::new(),
+    };
+    let proposal = access::decide_proposal(
+        &state.data_dir,
+        &id,
+        access::ProposalStatus::Rejected,
+        &username,
+        access::now(),
+        None,
+    )
+    .map_err(decide_error)?;
+    let _ = proposal;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn propose(
+    state: &AppState,
+    principal: &Principal,
+    request: access::ProposalRequest,
+) -> Result<Response, ApiError> {
+    if !principal.is_agent() {
+        return Err(ApiError::forbidden(
+            "Only the agent credential creates proposals.",
+        ));
+    }
+    let issuer = match principal {
+        Principal::Agent { credential_id } => Some(credential_id.as_str()),
+        Principal::Browser { .. } => None,
+    };
+    let proposal = access::create_proposal(&state.data_dir, request, issuer, access::now())
+        .map_err(ApiError::daemon)?;
+    Ok((StatusCode::ACCEPTED, Json(proposal)).into_response())
+}
+
+/// Re-run every check against live state, then (and only then) act. An agent
+/// proposal is a request, not an authorization.
+async fn execute_proposal(
+    state: &AppState,
+    proposal: &access::Proposal,
+) -> Result<(), ApiError> {
+    let endpoint = require_docker(state, &proposal.endpoint_id)?;
+    let container_id = proposal.container_id.clone().unwrap_or_default();
+    match proposal.action.as_str() {
+        "start" | "stop" | "restart" => {
+            let container_id = docker::object_ref(&container_id)?.to_string();
+            let live = docker::live_access(&container_id).await?;
+            let value = access_for(state, &endpoint.id, &container_id, &live).await;
+            require_access_operate(&value)?;
+            match proposal.action.as_str() {
+                "start" => docker::start_container(&container_id).await,
+                "stop" => docker::stop_container(&container_id).await,
+                _ => docker::restart_container(&container_id).await,
+            }
+        }
+        "run" => {
+            let body: RunBody = serde_json::from_value(proposal.payload.clone())
+                .map_err(|_| ApiError::validation("The proposed container is not valid."))?;
+            let created = apply_run(state, body).await?;
+            access::remember_policy(
+                &state.data_dir,
+                access::PolicyEntry {
+                    container_id: created.id,
+                    endpoint_id: endpoint.id.clone(),
+                    container_name: created.name,
+                    state: access::State::Locked,
+                    updated_at: access::now(),
+                    updated_by: "agent".to_string(),
+                },
+            )
+            .map_err(ApiError::daemon)
+        }
+        "settings" => {
+            let body: ContainerSettingsBody = serde_json::from_value(proposal.payload.clone())
+                .map_err(|_| ApiError::validation("The proposed settings are not valid."))?;
+            let container_id = docker::object_ref(&container_id)?.to_string();
+            let live = docker::live_access(&container_id).await?;
+            let value = access_for(state, &endpoint.id, &container_id, &live).await;
+            require_access_operate(&value)?;
+            docker::update_container_settings(
+                &container_id,
+                Some(&body.name),
+                Some(&body.restart_policy),
+                body.restart_maximum_retry_count,
+            )
+            .await?;
+            access::rename_policy(
+                &state.data_dir,
+                &endpoint.id,
+                &container_id,
+                &live.name,
+                &body.name,
+            );
+            Ok(())
+        }
+        "duplicate" => {
+            let body: DuplicateBody = serde_json::from_value(proposal.payload.clone())
+                .map_err(|_| ApiError::validation("The proposed duplicate is not valid."))?;
+            let source = docker::object_ref(&container_id)?.to_string();
+            let live = docker::live_access(&source).await?;
+            let value = access_for(state, &endpoint.id, &source, &live).await;
+            require_access_operate(&value)?;
+            let reachable = reachable_map(state, &endpoint.id).await;
+            let mutation = access::Mutation::from_edits(
+                body.env.as_deref().unwrap_or_default(),
+                body.labels.as_deref().unwrap_or_default(),
+                body.mounts.as_deref().unwrap_or_default(),
+            );
+            refusal_for(state, &mutation, &reachable)?;
+            let name = docker::checked_container_name(&body.name)?;
+            let edits = docker::ContainerEdits {
+                image: body.image,
+                command: body.command,
+                entrypoint: body.entrypoint,
+                env: body.env,
+                labels: body.labels,
+                ports: body.ports,
+                mounts: body.mounts,
+                restart: body.restart_policy,
+            };
+            let created = docker::duplicate_or_replace(&source, &name, &edits).await?;
+            access::copy_policy(
+                &state.data_dir,
+                &endpoint.id,
+                &live,
+                &source,
+                &created.id,
+                &created.name,
+            )
+            .map_err(ApiError::daemon)?;
+            if live.name.eq_ignore_ascii_case(&created.name) {
+                access::forget_policy(&state.data_dir, &endpoint.id, &source, &live.name);
+            }
+            Ok(())
+        }
+        "recreate" => {
+            let source = docker::object_ref(&container_id)?.to_string();
+            let live = docker::live_access(&source).await?;
+            let value = access_for(state, &endpoint.id, &source, &live).await;
+            require_access_operate(&value)?;
+            let created = docker::recreate_container(&source, None).await?;
+            access::copy_policy(
+                &state.data_dir,
+                &endpoint.id,
+                &live,
+                &source,
+                &created.id,
+                &created.name,
+            )
+            .map_err(ApiError::daemon)?;
+            access::forget_policy(&state.data_dir, &endpoint.id, &source, &live.name);
+            Ok(())
+        }
+        "stack-create" => {
+            let body: StackBody = serde_json::from_value(proposal.payload.clone())
+                .map_err(|_| ApiError::validation("The proposed stack is not valid."))?;
+            let reachable = reachable_map(state, &endpoint.id).await;
+            let mutation = access::mutation_from_compose(&body.compose);
+            refusal_for(state, &mutation, &reachable)?;
+            apply_stack_create(state, &endpoint, body).await
+        }
+        "stack-update" => {
+            let body: StackBody = serde_json::from_value(proposal.payload.clone())
+                .map_err(|_| ApiError::validation("The proposed stack is not valid."))?;
+            let project = proposal.project.clone().unwrap_or_else(|| body.project.clone());
+            stack_guard(state, &endpoint.id, &project, true).await?;
+            let reachable = reachable_map(state, &endpoint.id).await;
+            let mutation = access::mutation_from_compose(&body.compose);
+            refusal_for(state, &mutation, &reachable)?;
+            apply_stack_update(state, &endpoint, project, body).await
+        }
+        _ => Err(ApiError::validation("Unknown proposal action.")),
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -484,29 +1283,67 @@ async fn list_containers(
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ListPage<docker::ContainerOut>>, ApiError> {
-    require_docker(&state, &id)?;
+    let endpoint = require_docker(&state, &id)?;
     let items = docker::list_containers(
         query.q.as_deref().unwrap_or(""),
         query.state.as_deref().unwrap_or(""),
     )
     .await?;
-    Ok(Json(page_of(items, &query)?))
+    let mut page = page_of(items, &query)?;
+    let labels = access_labels(&state, &endpoint.id, &page.items).await;
+    for (item, label) in page.items.iter_mut().zip(labels) {
+        item.ai_access = label;
+    }
+    Ok(Json(page))
 }
 
 async fn list_stacks(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<ListPage<StackView>>, ApiError> {
     let endpoint = require_docker(&state, &id)?;
     let live = docker::list_stacks(query.q.as_deref().unwrap_or("")).await?;
-    let guard = lock(&state);
-    let managed = guard.stack_projects(&endpoint.id);
+    let q = query.q.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    // The store lock is taken and released inside this helper so it never
+    // lives across an await (a MutexGuard is not Send).
+    let mut items = stack_views(&state, &endpoint.id, live, &q);
+    if principal.is_agent() {
+        // A stack is only visible when every service in it is readable; the
+        // locked members stay out of the answer entirely.
+        let mut allowed = Vec::with_capacity(items.len());
+        for stack in items {
+            let mut readable = true;
+            for container in &stack.containers {
+                let value = container_access(&state, &endpoint.id, &container.id).await?;
+                if !value.state.allows_read() {
+                    readable = false;
+                    break;
+                }
+            }
+            if readable {
+                allowed.push(stack);
+            }
+        }
+        items = allowed;
+    }
+    Ok(Json(page_of(items, &query)?))
+}
+
+fn stack_views(
+    state: &AppState,
+    endpoint_id: &str,
+    live: Vec<docker::StackOut>,
+    q: &str,
+) -> Vec<StackView> {
+    let guard = lock(state);
+    let managed = guard.stack_projects(endpoint_id);
     let mut items: Vec<StackView> = live
         .into_iter()
         .map(|stack| {
-            let has_file = guard.stack_file(&endpoint.id, &stack.project).is_some();
-            let is_managed = guard.stack_exists(&endpoint.id, &stack.project);
+            let has_file = guard.stack_file(endpoint_id, &stack.project).is_some();
+            let is_managed = guard.stack_exists(endpoint_id, &stack.project);
             StackView {
                 project: stack.project,
                 origin: if is_managed { "managed" } else { "discovered" },
@@ -522,7 +1359,7 @@ async fn list_stacks(
         .collect();
     for project in managed {
         if !items.iter().any(|stack| stack.project == project) {
-            let compose = guard.stack_file(&endpoint.id, &project);
+            let compose = guard.stack_file(endpoint_id, &project);
             items.push(StackView {
                 project,
                 origin: "managed",
@@ -536,23 +1373,58 @@ async fn list_stacks(
             });
         }
     }
-    let q = query.q.as_deref().unwrap_or("").trim().to_ascii_lowercase();
-    items.retain(|stack| q.is_empty() || stack.project.to_ascii_lowercase().contains(&q));
+    drop(guard);
+    items.retain(|stack| q.is_empty() || stack.project.to_ascii_lowercase().contains(q));
     items.sort_by(|a, b| a.project.cmp(&b.project));
-    Ok(Json(page_of(items, &query)?))
+    items
 }
 
 async fn create_stack(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Result<Json<StackBody>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let endpoint = require_docker(&state, &id)?;
     let body = take_json(body)?;
+    let endpoint = require_docker(&state, &id)?;
+    if principal.is_agent() {
+        let reachable = reachable_map(&state, &endpoint.id).await;
+        let mutation = access::mutation_from_compose(&body.compose);
+        refusal_for(&state, &mutation, &reachable)?;
+        return propose(
+            &state,
+            &principal,
+            access::ProposalRequest {
+                action: "stack-create".into(),
+                endpoint_id: endpoint.id,
+                container_id: None,
+                container_name: None,
+                project: Some(body.project.clone()),
+                payload: serde_json::to_value(&body).unwrap_or_default(),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(&headers)?;
+    let project = body.project.clone();
+    apply_stack_create(&state, &endpoint, body).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "project": project })),
+    )
+        .into_response())
+}
+
+async fn apply_stack_create(
+    state: &AppState,
+    endpoint: &Endpoint,
+    body: StackBody,
+) -> Result<(), ApiError> {
     stacks::validate_project_name(&body.project)?;
     stacks::validate_compose(&body.compose)?;
     let _apply = state.stack_apply.lock(&endpoint.id, &body.project).await;
-    let managed_exists = lock(&state).stack_exists(&endpoint.id, &body.project);
+    let managed_exists = lock(state).stack_exists(&endpoint.id, &body.project);
     let live_exists = docker::list_stacks("")
         .await?
         .iter()
@@ -563,29 +1435,26 @@ async fn create_stack(
             body.project
         )));
     }
-    let dir = lock(&state)
+    let dir = lock(state)
         .create_stack_dir(&endpoint.id, &body.project)
         .map_err(ApiError::daemon)?;
-    lock(&state)
+    lock(state)
         .stage_stack_file(&endpoint.id, &body.project, &body.compose)
         .map_err(ApiError::daemon)?;
     let candidate = dir.join("compose.yaml.new");
     if let Err(error) = stacks::up(&body.project, &dir, &candidate).await {
-        lock(&state).keep_failed_create(&endpoint.id, &body.project, &error.message);
+        lock(state).keep_failed_create(&endpoint.id, &body.project, &error.message);
         return Err(error);
     }
-    lock(&state)
+    lock(state)
         .commit_stack_file(&endpoint.id, &body.project)
         .map_err(ApiError::deploy)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "project": body.project })),
-    )
-        .into_response())
+    Ok(())
 }
 
 async fn get_stack(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, project)): Path<(String, String)>,
 ) -> Result<Json<StackView>, ApiError> {
     let endpoint = require_docker(&state, &id)?;
@@ -606,7 +1475,10 @@ async fn get_stack(
     if stack.is_none() && !exists {
         return Err(ApiError::not_found(format!("{project} was not found.")));
     }
-    let view = if let Some(stack) = stack {
+    if principal.is_agent() {
+        stack_guard(&state, &endpoint.id, &project, false).await?;
+    }
+    let mut view = if let Some(stack) = stack {
         let ids: std::collections::HashSet<String> = stack
             .containers
             .iter()
@@ -641,16 +1513,58 @@ async fn get_stack(
             compose,
         }
     };
+    if principal.is_agent() {
+        if let Some(compose) = view.compose.take() {
+            view.compose = Some(access::redact_compose(&compose));
+        }
+    }
     Ok(Json(view))
 }
 
 async fn update_stack(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, project)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Result<Json<StackBody>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let endpoint = require_docker(&state, &id)?;
     let body = take_json(body)?;
+    if principal.is_agent() {
+        stacks::validate_project_name(&project)?;
+        stacks::validate_compose(&body.compose)?;
+        if body.project != project {
+            return Err(ApiError::validation("The stack name cannot be changed."));
+        }
+        stack_guard(&state, &endpoint.id, &project, true).await?;
+        let reachable = reachable_map(&state, &endpoint.id).await;
+        let mutation = access::mutation_from_compose(&body.compose);
+        refusal_for(&state, &mutation, &reachable)?;
+        return propose(
+            &state,
+            &principal,
+            access::ProposalRequest {
+                action: "stack-update".into(),
+                endpoint_id: endpoint.id,
+                container_id: None,
+                container_name: None,
+                project: Some(project),
+                payload: serde_json::to_value(&body).unwrap_or_default(),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(&headers)?;
+    apply_stack_update(&state, &endpoint, project, body).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn apply_stack_update(
+    state: &AppState,
+    endpoint: &Endpoint,
+    project: String,
+    body: StackBody,
+) -> Result<(), ApiError> {
     stacks::validate_project_name(&project)?;
     stacks::validate_compose(&body.compose)?;
     if body.project != project {
@@ -658,7 +1572,7 @@ async fn update_stack(
     }
     let _apply = state.stack_apply.lock(&endpoint.id, &project).await;
     let dir = {
-        let guard = lock(&state);
+        let guard = lock(state);
         if guard.stack_file(&endpoint.id, &project).is_none() {
             return Err(ApiError::not_found(
                 "No Compose file is stored for this stack.",
@@ -668,18 +1582,18 @@ async fn update_stack(
             .create_stack_dir(&endpoint.id, &project)
             .map_err(ApiError::daemon)?
     };
-    lock(&state)
+    lock(state)
         .stage_stack_file(&endpoint.id, &project, &body.compose)
         .map_err(ApiError::daemon)?;
     if let Err(error) = stacks::up(&project, &dir, &dir.join("compose.yaml.new")).await {
         let _ = std::fs::remove_file(dir.join("compose.yaml.new"));
-        lock(&state).record_stack_error(&endpoint.id, &project, &error.message);
+        lock(state).record_stack_error(&endpoint.id, &project, &error.message);
         return Err(error);
     }
-    lock(&state)
+    lock(state)
         .commit_stack_file(&endpoint.id, &project)
         .map_err(ApiError::deploy)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 async fn delete_stack(
@@ -724,20 +1638,34 @@ async fn delete_stack(
 
 async fn container_detail(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
 ) -> Result<Json<docker::ContainerDetail>, ApiError> {
-    require_docker(&state, &id)?;
+    let endpoint = require_docker(&state, &id)?;
     let container_id = docker::object_ref(&container_id)?;
-    Ok(Json(docker::inspect_container(container_id).await?))
+    let mut detail = docker::inspect_container(container_id).await?;
+    if principal.is_agent() {
+        let value = container_access(&state, &endpoint.id, container_id).await?;
+        require_access_read(&value)?;
+        if !value.state.allows_operate() {
+            access::redact_detail(&mut detail);
+        }
+    }
+    Ok(Json(detail))
 }
 
 async fn container_logs(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    require_docker(&state, &id)?;
+    let endpoint = require_docker(&state, &id)?;
     let container_id = docker::object_ref(&container_id)?;
+    if principal.is_agent() {
+        let value = container_access(&state, &endpoint.id, container_id).await?;
+        require_access_read(&value)?;
+    }
     let tail = query
         .tail
         .as_deref()
@@ -752,11 +1680,16 @@ async fn container_logs(
 /// Next proxy exempts it from its 10 s abort (`frontend/app/api/[...path]/route.ts`).
 async fn container_logs_stream(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
     Query(query): Query<ListQuery>,
 ) -> Result<Response, ApiError> {
-    require_docker(&state, &id)?;
+    let endpoint = require_docker(&state, &id)?;
     let container_id = docker::object_ref(&container_id)?;
+    if principal.is_agent() {
+        let value = container_access(&state, &endpoint.id, container_id).await?;
+        require_access_read(&value)?;
+    }
     let tail = query
         .tail
         .as_deref()
@@ -935,43 +1868,118 @@ async fn send_console_error(socket: &mut WebSocket, message: String) {
 
 async fn start_container(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    act(&state, &id, &container_id, "start").await
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    action_route(&state, &principal, &id, &container_id, "start", &headers).await
 }
 
 async fn stop_container(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    act(&state, &id, &container_id, "stop").await
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    action_route(&state, &principal, &id, &container_id, "stop", &headers).await
 }
 
 async fn restart_container(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
-) -> Result<StatusCode, ApiError> {
-    act(&state, &id, &container_id, "restart").await
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    action_route(&state, &principal, &id, &container_id, "restart", &headers).await
+}
+
+/// One path for a browser and for the agent. The agent never acts directly: an
+/// allowed action becomes a pending proposal, a refused one is a 403 right away.
+async fn action_route(
+    state: &AppState,
+    principal: &Principal,
+    endpoint_id: &str,
+    container_id: &str,
+    action: &str,
+    headers: &HeaderMap,
+) -> Result<Response, ApiError> {
+    let endpoint = require_docker(state, endpoint_id)?;
+    let container_id = docker::object_ref(container_id)?.to_string();
+    if principal.is_agent() {
+        let live = docker::live_access(&container_id).await?;
+        let value = access_for(state, &endpoint.id, &container_id, &live).await;
+        require_access_operate(&value)?;
+        return propose(
+            state,
+            principal,
+            access::ProposalRequest {
+                action: action.to_string(),
+                endpoint_id: endpoint.id,
+                container_id: Some(container_id),
+                container_name: Some(live.name),
+                project: None,
+                payload: serde_json::json!({ "action": action }),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(headers)?;
+    act(state, &endpoint.id, &container_id, action).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn delete_container(
     State(state): State<AppState>,
     Path((id, container_id)): Path<(String, String)>,
 ) -> Result<StatusCode, ApiError> {
-    act(&state, &id, &container_id, "remove").await
+    let endpoint = require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?.to_string();
+    let live = docker::live_access(&container_id).await.ok();
+    act(&state, &endpoint.id, &container_id, "remove").await?;
+    access::forget_policy(
+        &state.data_dir,
+        &endpoint.id,
+        &container_id,
+        live.as_ref().map(|value| value.name.as_str()).unwrap_or(""),
+    );
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn create_container(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     body: Result<Json<RunBody>, JsonRejection>,
-) -> Result<(StatusCode, Json<docker::CreatedContainer>), ApiError> {
+) -> Result<Response, ApiError> {
     let body = take_json(body)?;
-    require_docker(&state, &id)?;
+    let endpoint = require_docker(&state, &id)?;
+    if principal.is_agent() {
+        return propose(
+            &state,
+            &principal,
+            access::ProposalRequest {
+                action: "run".into(),
+                endpoint_id: endpoint.id,
+                container_id: None,
+                container_name: body.name.clone(),
+                project: None,
+                payload: serde_json::to_value(&body).unwrap_or_default(),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(&headers)?;
+    let created = apply_run(&state, body).await?;
+    Ok((StatusCode::CREATED, Json(created)).into_response())
+}
+
+async fn apply_run(state: &AppState, body: RunBody) -> Result<docker::CreatedContainer, ApiError> {
+    let _ = state;
     if let Some(name) = body.name.as_deref().filter(|name| !name.trim().is_empty()) {
         docker::object_ref(name)?;
     }
-    let created = docker::run_container(docker::RunRequest {
+    docker::run_container(docker::RunRequest {
         image: body.image,
         name: body.name,
         ports: body
@@ -985,8 +1993,7 @@ async fn create_container(
             })
             .collect(),
     })
-    .await?;
-    Ok((StatusCode::CREATED, Json(created)))
+    .await
 }
 
 async fn list_images(
@@ -1010,21 +2017,63 @@ async fn delete_image(
 
 async fn container_config(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
 ) -> Result<Json<docker::ContainerConfigOut>, ApiError> {
-    require_docker(&state, &id)?;
+    let endpoint = require_docker(&state, &id)?;
     let container_id = docker::object_ref(&container_id)?;
-    Ok(Json(docker::container_config(container_id).await?))
+    let mut config = docker::container_config(container_id).await?;
+    if principal.is_agent() {
+        let value = container_access(&state, &endpoint.id, container_id).await?;
+        require_access_read(&value)?;
+        if !value.state.allows_operate() {
+            access::redact_config(&mut config);
+        }
+    }
+    Ok(Json(config))
 }
 
 async fn update_container_settings(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Result<Json<ContainerSettingsBody>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let body = take_json(body)?;
-    require_docker(&state, &id)?;
-    let container_id = docker::object_ref(&container_id)?;
+    let endpoint = require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?.to_string();
+    if principal.is_agent() {
+        let live = docker::live_access(&container_id).await?;
+        let value = access_for(&state, &endpoint.id, &container_id, &live).await;
+        require_access_operate(&value)?;
+        return propose(
+            &state,
+            &principal,
+            access::ProposalRequest {
+                action: "settings".into(),
+                endpoint_id: endpoint.id,
+                container_id: Some(container_id),
+                container_name: Some(live.name),
+                project: None,
+                payload: serde_json::to_value(&body).unwrap_or_default(),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(&headers)?;
+    let live = docker::live_access(&container_id).await?;
+    apply_settings(&state, &endpoint.id, &container_id, &live.name, body).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn apply_settings(
+    state: &AppState,
+    endpoint_id: &str,
+    container_id: &str,
+    old_name: &str,
+    body: ContainerSettingsBody,
+) -> Result<(), ApiError> {
     docker::update_container_settings(
         container_id,
         Some(&body.name),
@@ -1032,17 +2081,76 @@ async fn update_container_settings(
         body.restart_maximum_retry_count,
     )
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    access::rename_policy(
+        &state.data_dir,
+        endpoint_id,
+        container_id,
+        old_name,
+        &body.name,
+    );
+    Ok(())
 }
 
 async fn duplicate_container(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
+    headers: HeaderMap,
     body: Result<Json<DuplicateBody>, JsonRejection>,
-) -> Result<(StatusCode, Json<docker::CreatedContainer>), ApiError> {
+) -> Result<Response, ApiError> {
     let body = take_json(body)?;
-    require_docker(&state, &id)?;
-    let source = docker::object_ref(&container_id)?;
+    let endpoint = require_docker(&state, &id)?;
+    let source = docker::object_ref(&container_id)?.to_string();
+    if principal.is_agent() {
+        let live = docker::live_access(&source).await?;
+        let value = access_for(&state, &endpoint.id, &source, &live).await;
+        require_access_operate(&value)?;
+        let reachable = reachable_map(&state, &endpoint.id).await;
+        let mutation = access::Mutation::from_edits(
+            body.env.as_deref().unwrap_or_default(),
+            body.labels.as_deref().unwrap_or_default(),
+            body.mounts.as_deref().unwrap_or_default(),
+        );
+        refusal_for(&state, &mutation, &reachable)?;
+        return propose(
+            &state,
+            &principal,
+            access::ProposalRequest {
+                action: "duplicate".into(),
+                endpoint_id: endpoint.id,
+                container_id: Some(source),
+                container_name: Some(live.name),
+                project: None,
+                payload: serde_json::to_value(&body).unwrap_or_default(),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(&headers)?;
+    let live = docker::live_access(&source).await.ok();
+    let created = apply_duplicate(&state, &source, body).await?;
+    if let Some(live) = live {
+        let _ = access::copy_policy(
+            &state.data_dir,
+            &endpoint.id,
+            &live,
+            &source,
+            &created.id,
+            &created.name,
+        );
+        if live.name.eq_ignore_ascii_case(&created.name) {
+            access::forget_policy(&state.data_dir, &endpoint.id, &source, &live.name);
+        }
+    }
+    Ok((StatusCode::CREATED, Json(created)).into_response())
+}
+
+async fn apply_duplicate(
+    state: &AppState,
+    source: &str,
+    body: DuplicateBody,
+) -> Result<docker::CreatedContainer, ApiError> {
+    let _ = state;
     let name = docker::checked_container_name(&body.name)?;
     let edits = docker::ContainerEdits {
         image: body.image,
@@ -1055,19 +2163,52 @@ async fn duplicate_container(
         restart: body.restart_policy,
     };
     // Keeping the original name is Portainer's "Duplicate/Edit" replace path.
-    let created = docker::duplicate_or_replace(source, &name, &edits)
+    docker::duplicate_or_replace(source, &name, &edits)
         .await
-        .map_err(safe_container_edit_error)?;
-    Ok((StatusCode::CREATED, Json(created)))
+        .map_err(safe_container_edit_error)
 }
 
 async fn recreate_container(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path((id, container_id)): Path<(String, String)>,
-) -> Result<Json<docker::CreatedContainer>, ApiError> {
-    require_docker(&state, &id)?;
-    let source = docker::object_ref(&container_id)?;
-    Ok(Json(docker::recreate_container(source, None).await?))
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let endpoint = require_docker(&state, &id)?;
+    let source = docker::object_ref(&container_id)?.to_string();
+    if principal.is_agent() {
+        let live = docker::live_access(&source).await?;
+        let value = access_for(&state, &endpoint.id, &source, &live).await;
+        require_access_operate(&value)?;
+        return propose(
+            &state,
+            &principal,
+            access::ProposalRequest {
+                action: "recreate".into(),
+                endpoint_id: endpoint.id,
+                container_id: Some(source),
+                container_name: Some(live.name),
+                project: None,
+                payload: serde_json::json!({ "action": "recreate" }),
+            },
+        )
+        .await;
+    }
+    same_origin_guard(&headers)?;
+    let live = docker::live_access(&source).await.ok();
+    let created = docker::recreate_container(&source, None).await?;
+    if let Some(live) = live {
+        let _ = access::copy_policy(
+            &state.data_dir,
+            &endpoint.id,
+            &live,
+            &source,
+            &created.id,
+            &created.name,
+        );
+        access::forget_policy(&state.data_dir, &endpoint.id, &source, &live.name);
+    }
+    Ok(Json(created).into_response())
 }
 
 async fn list_volumes(
@@ -1308,9 +2449,20 @@ mod console_tests {
                 },
                 store: Arc::new(Mutex::new(store)),
                 stack_apply: Arc::new(StackApplyLocks::default()),
+                data_dir: dir.clone(),
             },
             dir,
         )
+    }
+
+    fn same_origin_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://localhost:3000"),
+        );
+        headers
     }
 
     #[tokio::test]
@@ -1318,7 +2470,11 @@ mod console_tests {
         let (state, dir) = stack_test_state();
         let result = create_stack(
             State(state.clone()),
+            Extension(Principal::Browser {
+                username: "operator".to_string(),
+            }),
             Path("endpoint-1".to_string()),
+            same_origin_headers(),
             Ok(Json(StackBody {
                 project: "../unsafe".to_string(),
                 compose: "services:\n  web:\n    image: nginx\n".to_string(),
@@ -1337,7 +2493,11 @@ mod console_tests {
         let (state, dir) = stack_test_state();
         let result = update_stack(
             State(state),
+            Extension(Principal::Browser {
+                username: "operator".to_string(),
+            }),
             Path(("endpoint-1".to_string(), "sample".to_string())),
+            same_origin_headers(),
             Ok(Json(StackBody {
                 project: "different".to_string(),
                 compose: "services:\n  web:\n    image: nginx\n".to_string(),

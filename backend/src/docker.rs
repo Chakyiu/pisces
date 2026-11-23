@@ -139,6 +139,21 @@ pub struct ContainerOut {
     pub status_text: String,
     pub ports: Vec<PortOut>,
     pub created: i64,
+    /// `locked` / `read` / `operate` for the AI agent, when the caller asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_access: Option<AiAccessLabel>,
+}
+
+/// The agent policy for one listed container. Forced lock is included so the
+/// console can say "Locked · forced" without a second request per row.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAccessLabel {
+    pub state: String,
+    pub forced_locked: bool,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1197,6 +1212,80 @@ async fn inspect_raw(docker: &Docker, id: &str) -> Result<ContainerInspectRespon
     }
 }
 
+/// Facts the AI access policy needs, always read from the live inspect so a
+/// policy change or an engine-side edit cannot hide them.
+pub fn live_access_from(inspected: &ContainerInspectResponse) -> crate::access::LiveAccess {
+    let host = inspected.host_config.as_ref();
+    let mut mount_sources = Vec::new();
+    let mut volume_names = Vec::new();
+    for mount in inspected.mounts.as_deref().unwrap_or_default() {
+        if let Some(source) = mount.source.as_deref().filter(|value| !value.is_empty()) {
+            mount_sources.push(source.to_string());
+        }
+        if let Some(name) = mount.name.as_deref().filter(|value| !value.is_empty()) {
+            volume_names.push(name.to_string());
+        }
+    }
+    if let Some(binds) = host.and_then(|host| host.binds.as_ref()) {
+        for bind in binds {
+            if let Some(source) = bind_source(bind) {
+                mount_sources.push(source);
+            }
+        }
+    }
+    crate::access::LiveAccess {
+        name: inspected_name(inspected),
+        mount_sources,
+        volume_names,
+        network_mode: host.and_then(|host| host.network_mode.clone()),
+        pid_mode: host.and_then(|host| host.pid_mode.clone()),
+        ipc_mode: host.and_then(|host| host.ipc_mode.clone()),
+        privileged: host.and_then(|host| host.privileged).unwrap_or(false),
+        devices: host
+            .and_then(|host| host.devices.as_ref())
+            .map(|devices| devices.len())
+            .unwrap_or(0),
+        security_opt: host
+            .and_then(|host| host.security_opt.clone())
+            .unwrap_or_default(),
+        volumes_from: host
+            .and_then(|host| host.volumes_from.clone())
+            .unwrap_or_default(),
+        links: host.and_then(|host| host.links.clone()).unwrap_or_default(),
+    }
+}
+
+/// Host side of a `host:container[:mode]` bind spec.
+fn bind_source(spec: &str) -> Option<String> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    if parts.last().is_some_and(|last| {
+        last.eq_ignore_ascii_case("ro") || last.eq_ignore_ascii_case("rw") || last.contains(',')
+    }) {
+        parts.pop();
+    }
+    if parts.len() < 2 {
+        return None;
+    }
+    parts.pop();
+    if parts.len() == 2 && parts[0].len() == 1 && parts[0].as_bytes()[0].is_ascii_alphabetic() {
+        return Some(format!("{}:{}", parts[0], parts[1]));
+    }
+    Some(parts.join(":"))
+}
+
+pub async fn live_access(id: &str) -> Result<crate::access::LiveAccess, ApiError> {
+    let docker = docker()?;
+    let inspected = inspect_raw(&docker, id).await?;
+    Ok(live_access_from(&inspected))
+}
+
 /// Create and start a new container from the inspected source plus the edits.
 pub async fn duplicate_container(
     source: &str,
@@ -1925,6 +2014,7 @@ fn container_out(summary: &ContainerSummary) -> ContainerOut {
             })
             .unwrap_or_default(),
         created: summary.created.unwrap_or(0),
+        ai_access: None,
     }
 }
 

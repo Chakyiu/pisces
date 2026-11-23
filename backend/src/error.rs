@@ -42,6 +42,18 @@ impl ApiError {
         }
     }
 
+    /// The caller is authenticated but this object or action is not allowed.
+    /// The message is written for the reader and never echoes engine details.
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            code: "forbidden",
+            message: message.into(),
+            retryable: false,
+            message_is_safe: true,
+        }
+    }
+
     pub fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
@@ -59,6 +71,16 @@ impl ApiError {
             message: message.into(),
             retryable: false,
             message_is_safe: false,
+        }
+    }
+
+    pub fn gone(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GONE,
+            code: "gone",
+            message: message.into(),
+            retryable: false,
+            message_is_safe: true,
         }
     }
 

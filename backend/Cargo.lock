@@ -1537,11 +1537,13 @@ dependencies = [
  "axum",
  "bollard",
  "futures-util",
+ "getrandom 0.3.4",
  "jsonwebtoken",
  "k8s-openapi",
  "kube",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "windows-sys 0.61.2",
 ]

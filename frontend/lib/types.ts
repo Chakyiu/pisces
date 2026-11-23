@@ -30,6 +30,8 @@ export type Container = {
   statusText: string;
   ports: Port[];
   created: number;
+  /** Present on the container list: the agent policy for this container. */
+  aiAccess?: AiAccessLabel | null;
 };
 
 export type StackContainer = {
@@ -120,4 +122,68 @@ export type Network = {
   subnet: string;
   containerCount: number;
   removable: boolean;
+};
+
+export type AiAccessState = "locked" | "read" | "operate";
+
+export type AiAccess = {
+  state: AiAccessState;
+  forcedLocked: boolean;
+  reason: string;
+  mount?: string | null;
+  readable: boolean;
+};
+
+export type AiAccessItem = {
+  containerId: string;
+  containerName: string;
+  state: AiAccessState;
+  forcedLocked: boolean;
+  reason: string;
+  mount?: string | null;
+};
+
+/** The per-row policy carried on the container list. */
+export type AiAccessLabel = {
+  state: AiAccessState;
+  forcedLocked: boolean;
+  reason: string;
+  mount?: string | null;
+};
+
+export type AgentCredential = {
+  id: string;
+  issuedAt: number;
+  expiresAt: number;
+  revokedAt: number | null;
+  lastUsedAt: number | null;
+  state: "active" | "expired" | "revoked" | "none";
+};
+
+export type IssuedCredential = AgentCredential & { secret: string };
+
+export type ProposalStatus =
+  | "pending"
+  | "confirmed"
+  | "rejected"
+  | "expired"
+  | "failed"
+  | "applied";
+
+export type Proposal = {
+  id: string;
+  action: string;
+  endpointId: string;
+  containerId?: string | null;
+  containerName?: string | null;
+  project?: string | null;
+  /** The credential that asked, when the proposal record has one. */
+  credentialId?: string | null;
+  payload: unknown;
+  createdAt: number;
+  expiresAt: number;
+  status: ProposalStatus;
+  decidedBy?: string | null;
+  decidedAt?: number | null;
+  message?: string | null;
 };

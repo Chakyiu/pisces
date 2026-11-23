@@ -1,5 +1,6 @@
 //! Pisces backend — authenticated Docker control, Kubernetes context names only.
 
+mod access;
 mod auth;
 mod docker;
 mod error;
@@ -25,7 +26,8 @@ async fn main() {
         std::process::exit(1);
     });
     let dir = std::env::var("PISCES_DATA_DIR").unwrap_or_else(|_| "data".to_string());
-    let store = store::Store::open(PathBuf::from(dir)).unwrap_or_else(|message| {
+    let data_dir = PathBuf::from(&dir);
+    let store = store::Store::open(data_dir.clone()).unwrap_or_else(|message| {
         eprintln!("{message}");
         std::process::exit(1);
     });
@@ -33,6 +35,7 @@ async fn main() {
         auth,
         store: Arc::new(Mutex::new(store)),
         stack_apply: Arc::new(http::StackApplyLocks::default()),
+        data_dir,
     };
     let app = http::router(state);
 
