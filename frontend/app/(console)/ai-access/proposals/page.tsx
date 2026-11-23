@@ -316,8 +316,10 @@ function ReviewDialog({
               </div>
             )}
             <p className="ai-help">
-              Environment values, label values, and mount sources are removed by Pisces before the
-              proposal is stored. Pisces re-checks every service and mount at the moment you confirm.
+              Pisces stores the compose file as written, so the diff above is exactly what will run.
+              It does not scrub values out of it: a compose that asks for a credential-bearing
+              environment value, label, or mount source is refused when it is proposed, and checked
+              again when you confirm. Every service and mount is re-checked at that moment too.
             </p>
           </>
         ) : null}

@@ -47,12 +47,12 @@ test("published ports show the all-interfaces bind address", () => {
     "0.0.0.0:3000 → 3000/tcp",
   );
   assert.equal(
-    value(
-      "duplicate",
-      { name: "web-copy", ports: ["8080:80", "127.0.0.1:9000:9000/udp"] },
-      "Published ports",
-    ),
-    "0.0.0.0:8080 → 80/tcp\n127.0.0.1:9000 → 9000/udp",
+    value("duplicate", { name: "web-copy", ports: ["8080:80", "53:53/udp"] }, "Published ports"),
+    "0.0.0.0:8080 → 80/tcp\n0.0.0.0:53 → 53/udp",
+  );
+  assert.equal(
+    value("duplicate", { name: "web-copy", ports: ["443"] }, "Published ports"),
+    "0.0.0.0:443 → 443/tcp",
   );
   assert.equal(
     value("duplicate", { name: "web-copy", ports: ["expose:80"] }, "Published ports"),
@@ -61,6 +61,38 @@ test("published ports show the all-interfaces bind address", () => {
   assert.equal(
     value("duplicate", { name: "web-copy", ports: ["auto:80"] }, "Published ports"),
     "0.0.0.0:<random> → 80/tcp",
+  );
+});
+
+test("a port line the engine rejects is shown as rejected, not as a bind", () => {
+  // docker::parse_port_line splits on the first ':' and needs two u16s; it never
+  // reads a bind address from the line, and special_port_line is case-sensitive.
+  for (const line of ["127.0.0.1:8080:80", "Expose:3000", "8080:80/http", "a:b", "0:80", "70000:80"]) {
+    assert.equal(
+      value("duplicate", { name: "web-copy", ports: [line] }, "Published ports"),
+      `${line} — not a valid port mapping, so this proposal will be rejected`,
+      line,
+    );
+  }
+  assert.equal(
+    value("duplicate", { name: "web-copy", ports: ["8080"] }, "Published ports"),
+    "0.0.0.0:8080 → 8080/tcp",
+  );
+  assert.equal(
+    value("duplicate", { name: "web-copy", ports: ["53:53/udp"] }, "Published ports"),
+    "0.0.0.0:53 → 53/udp",
+  );
+  assert.equal(
+    value("duplicate", { name: "web-copy", ports: ["8080:80", ""] }, "Published ports"),
+    "0.0.0.0:8080 → 80/tcp",
+  );
+  assert.equal(
+    value("run", { image: "nginx", ports: [{ host: 0, container: 80 }] }, "Published ports"),
+    "Invalid port mapping — not a valid port mapping, so this proposal will be rejected",
+  );
+  assert.equal(
+    value("run", { image: "nginx", ports: [{ host: 8080, container: 80, protocol: "http" }] }, "Published ports"),
+    "Invalid port mapping — not a valid port mapping, so this proposal will be rejected",
   );
 });
 

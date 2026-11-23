@@ -105,29 +105,78 @@ function mountsOf(value: unknown): string[] {
  * exposure, not just the number. */
 const ALL_INTERFACES = "0.0.0.0";
 
-function withProtocol(value: string): string {
-  return value.includes("/") ? value : `${value}/tcp`;
+/** `docker::parse_port_line` and `special_port_line` accept these only. */
+const PROTOCOLS = ["tcp", "udp", "sctp"];
+
+const NOT_A_MAPPING = "not a valid port mapping, so this proposal will be rejected";
+
+/** `str::parse::<u16>` with the port-range check the engine applies. */
+function u16Port(value: string): number | null {
+  if (!/^\+?\d+$/.test(value)) return null;
+  const port = Number(value);
+  return port >= 1 && port <= 65535 ? port : null;
 }
 
-/** A duplicate's port line, in the forms `docker::parse_port_line` accepts. */
-function publishLine(line: string): string {
+/** `docker::special_port_line` (backend/src/docker.rs:839). The prefix match is
+ * case-sensitive, so `Expose:3000` is not the expose form and never becomes one. */
+function specialPort(line: string, prefix: string): { matched: boolean; port: string | null } {
+  if (!line.startsWith(prefix)) return { matched: false, port: null };
+  const value = line.slice(prefix.length);
+  const slash = value.indexOf("/");
+  const raw = slash < 0 ? value : value.slice(0, slash);
+  const protocol = slash < 0 ? "tcp" : value.slice(slash + 1);
+  const port = u16Port(raw);
+  const valid = port !== null && PROTOCOLS.includes(protocol);
+  return { matched: true, port: valid ? `${port}/${protocol}` : null };
+}
+
+/** `docker::parse_port_line` (backend/src/docker.rs:810): `host:container`, a
+ * single bare port, and an optional `/tcp`, `/udp` or `/sctp`. */
+function portMapping(line: string): { host: number; container: number; protocol: string } | null {
+  const slash = line.indexOf("/");
+  const mapping = slash < 0 ? line : line.slice(0, slash);
+  const protocol = slash < 0 ? "tcp" : line.slice(slash + 1);
+  if (!PROTOCOLS.includes(protocol)) return null;
+  const colon = mapping.indexOf(":");
+  const host = u16Port(colon < 0 ? mapping : mapping.slice(0, colon));
+  const container = u16Port(colon < 0 ? mapping : mapping.slice(colon + 1));
+  if (host === null || container === null) return null;
+  return { host, container, protocol };
+}
+
+/** One duplicate port line, rendered as the engine would apply it — or as the
+ * rejection it will be. Lines the engine skips outright render as null. */
+function publishLine(line: string): string | null {
   const trimmed = line.trim();
-  if (!trimmed) return "";
-  const lower = trimmed.toLowerCase();
-  if (lower.startsWith("expose:")) {
-    return `${withProtocol(trimmed.slice("expose:".length).trim())} (exposed only, not published)`;
+  if (!trimmed) return null;
+  const expose = specialPort(trimmed, "expose:");
+  if (expose.matched) {
+    return expose.port ? `${expose.port} (exposed only, not published)` : `${trimmed} — ${NOT_A_MAPPING}`;
   }
-  if (lower.startsWith("auto:")) {
-    return `${ALL_INTERFACES}:<random> → ${withProtocol(trimmed.slice("auto:".length).trim())}`;
+  const auto = specialPort(trimmed, "auto:");
+  if (auto.matched) {
+    return auto.port ? `${ALL_INTERFACES}:<random> → ${auto.port}` : `${trimmed} — ${NOT_A_MAPPING}`;
   }
-  const parts = trimmed.split(":");
-  if (parts.length === 2) {
-    return `${ALL_INTERFACES}:${parts[0]} → ${withProtocol(parts[1])}`;
-  }
-  if (parts.length === 3) {
-    return `${parts[0]}:${parts[1]} → ${withProtocol(parts[2])}`;
-  }
-  return trimmed;
+  const mapping = portMapping(trimmed);
+  if (!mapping) return `${trimmed} — ${NOT_A_MAPPING}`;
+  return `${ALL_INTERFACES}:${mapping.host} → ${mapping.container}/${mapping.protocol}`;
+}
+
+/** A `RunPortBody`, whose host and container are already integers. */
+function objectPort(entry: Bag): string {
+  const port = (value: unknown): number | null =>
+    typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535
+      ? value
+      : typeof value === "string"
+        ? u16Port(value.trim())
+        : null;
+  const host = port(entry.host);
+  const container = port(entry.container);
+  const protocol = text(entry.protocol) || "tcp";
+  const valid = host !== null && container !== null && PROTOCOLS.includes(protocol);
+  return valid
+    ? `${ALL_INTERFACES}:${host} → ${container}/${protocol}`
+    : `Invalid port mapping — ${NOT_A_MAPPING}`;
 }
 
 function portsOf(value: unknown): string {
@@ -136,16 +185,8 @@ function portsOf(value: unknown): string {
       const line = publishLine(entry);
       return line ? [line] : [];
     }
-    if (entry && typeof entry === "object") {
-      const port = entry as Bag;
-      const container = port.container;
-      const host = port.host;
-      const protocol = text(port.protocol) || "tcp";
-      if (typeof container !== "number" && typeof container !== "string") return [];
-      const published = host === undefined || host === null ? "<random>" : String(host);
-      return [`${ALL_INTERFACES}:${published} → ${String(container)}/${protocol}`];
-    }
-    return [];
+    if (entry && typeof entry === "object") return [objectPort(entry as Bag)];
+    return [`${String(entry)} — ${NOT_A_MAPPING}`];
   });
   return lines.length > 0 ? lines.join("\n") : "None published";
 }
