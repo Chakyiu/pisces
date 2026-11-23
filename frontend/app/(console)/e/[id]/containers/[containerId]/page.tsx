@@ -8,6 +8,7 @@ import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerAiAccess } from "../../../../../../components/container-ai-access";
 import { ContainerConsole } from "../../../../../../components/container-console";
+import { ContainerLogs } from "../../../../../../components/container-logs";
 import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
 import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
@@ -199,6 +200,12 @@ function Body({
           onClose={() => setConsoleOpen(false)}
         />
       ) : null}
+      <ContainerLogs
+        endpointId={endpointId}
+        containerId={containerId}
+        reload={reload}
+        defaultFollow={isRunning}
+      />
       <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
       <section className="widget">
         <h2>Status</h2>
