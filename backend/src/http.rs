@@ -1657,17 +1657,40 @@ async fn apply_stack_update(
         return Err(ApiError::validation("The stack name cannot be changed."));
     }
     let _apply = state.stack_apply.lock(&endpoint.id, &project).await;
-    let dir = {
+    let (managed_exists, has_file) = {
         let guard = lock(state);
-        if guard.stack_file(&endpoint.id, &project).is_none() {
-            return Err(ApiError::not_found(
-                "No Compose file is stored for this stack.",
-            ));
-        }
-        guard
-            .create_stack_dir(&endpoint.id, &project)
-            .map_err(ApiError::daemon)?
+        (
+            guard.stack_exists(&endpoint.id, &project),
+            guard.stack_file(&endpoint.id, &project).is_some(),
+        )
     };
+    if !has_file {
+        let live_exists = docker::list_stacks("")
+            .await?
+            .iter()
+            .any(|stack| stack.project == project);
+        if !managed_exists && !live_exists {
+            return Err(ApiError::not_found(format!("{project} was not found.")));
+        }
+        let dir = lock(state)
+            .create_stack_dir(&endpoint.id, &project)
+            .map_err(ApiError::daemon)?;
+        lock(state)
+            .stage_stack_file(&endpoint.id, &project, &body.compose)
+            .map_err(ApiError::daemon)?;
+        let candidate = dir.join("compose.yaml.new");
+        if let Err(error) = stacks::up(&project, &dir, &candidate).await {
+            lock(state).keep_failed_create(&endpoint.id, &project, &error.message);
+            return Err(error);
+        }
+        lock(state)
+            .commit_stack_file(&endpoint.id, &project)
+            .map_err(ApiError::deploy)?;
+        return Ok(());
+    }
+    let dir = lock(state)
+        .create_stack_dir(&endpoint.id, &project)
+        .map_err(ApiError::daemon)?;
     lock(state)
         .stage_stack_file(&endpoint.id, &project, &body.compose)
         .map_err(ApiError::daemon)?;

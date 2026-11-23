@@ -12,7 +12,14 @@ import { PageFrame } from "../../../../../../components/shell";
 import { ComposeEditor } from "../compose-editor";
 
 const LOST_REQUEST = "The console lost the deploy request. Check the stack list before trying again. The engine may still be applying it.";
+const MAX_BYTES = 1_048_576;
 const isUp = (container: { state: string }) => container.state === "running" || container.state === "restarting";
+
+function fileError(value: string) {
+  if (!value.trim()) return "Stack file content is required";
+  if (new TextEncoder().encode(value).byteLength > MAX_BYTES) return "This file is larger than 1 MB. Pisces accepts Compose files up to 1 MB.";
+  return "";
+}
 
 type Tab = "stack" | "editor";
 
@@ -51,7 +58,10 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
   const [offset, setOffset] = useState(0);
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [pendingHref, setPendingHref] = useState("");
-  const dirty = Boolean(detail?.origin === "managed" && detail.hasFile && compose !== (detail.compose ?? ""));
+  const adopting = Boolean(detail && (detail.origin === "discovered" || !detail.hasFile));
+  const dirty = adopting
+    ? Boolean(compose.trim() && !fileError(compose))
+    : Boolean(detail?.origin === "managed" && detail.hasFile && compose !== (detail.compose ?? ""));
   const containers = detail?.containerDetails ?? [];
   const visible = containers.slice(offset, offset + 50);
   const selected = visible.filter((container) => picked[container.id]);
@@ -198,11 +208,11 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
         failureMessage: LOST_REQUEST,
       });
       await load();
-      setStatus(`Updated ${project}.`);
+      setStatus(adopting ? `Replaced ${project}.` : `Updated ${project}.`);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "The engine did not answer.";
       if (err instanceof ApiError) publishApiError(err.code);
-      setAlert(`Update failed. ${message}`);
+      setAlert(`${adopting ? "Replace" : "Update"} failed. ${message}`);
     } finally {
       window.clearTimeout(slowTimer);
       setPending("");
@@ -292,10 +302,20 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
         </section>
       ) : (
         <section id="stack-panel-editor" className="stack-panel" role="tabpanel" aria-labelledby="stack-tab-editor">
-          {detail.origin === "discovered" ? (
-            <div className="state"><h2>No Compose file stored</h2><p>Pisces found {project} from container labels on {endpointName}. It does not have the file that created those containers, so there is nothing to edit.</p></div>
-          ) : !detail.hasFile ? (
-            <div className="state"><h2>Compose file missing</h2><p>Pisces has a record for {project} on {endpointName}, but the Compose file is not there. There is nothing to edit.</p></div>
+          {adopting ? (
+            <>
+              <p className="stack-note">
+                {detail.origin === "discovered"
+                  ? <>Pisces found <span className="mono" translate="no">{project}</span> from container labels on {endpointName}. Paste a Compose file below to store it in Pisces and redeploy this stack. The stack name stays <span className="mono" translate="no">{project}</span>.</>
+                  : <>Pisces has a record for {project} on {endpointName}, but the Compose file is missing. Paste a file below to store and redeploy it. The stack name stays <span className="mono" translate="no">{project}</span>.</>}
+              </p>
+              <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} error={compose.trim() && fileError(compose) ? fileError(compose) : ""} />
+              <div className="stack-editor-actions">
+                <button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>
+                  {pending === "update" ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack"}
+                </button>
+              </div>
+            </>
           ) : (
             <>
               <p className="stack-note">The stack name stays <span className="mono" translate="no">{project}</span>.</p>
@@ -306,9 +326,13 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
         </section>
       )}
       {confirmUpdate ? (
-        <Dialog title={`Update ${project}?`} onClose={() => setConfirmUpdate(false)}>
-          <p>Pisces will redeploy this Compose file on {endpointName}. Services that this file no longer defines are removed. Named volumes stay.</p>
-          <div className="dialog-actions"><button className="btn" data-focus="first" type="button" onClick={() => setConfirmUpdate(false)}>Cancel</button><button className="btn primary" type="button" disabled={pending === "update"} onClick={() => void updateStack()}>{pending === "update" ? "Updating…" : "Update the stack"}</button></div>
+        <Dialog title={adopting ? (detail.origin === "discovered" ? `Replace ${project}?` : `Deploy ${project}?`) : `Update ${project}?`} onClose={() => setConfirmUpdate(false)}>
+          <p>
+            {adopting && detail.origin === "discovered"
+              ? `Pisces will store this Compose file and redeploy ${project} on ${endpointName}, replacing the containers found from labels. Services that this file no longer defines are removed. Named volumes stay.`
+              : `Pisces will redeploy this Compose file on ${endpointName}. Services that this file no longer defines are removed. Named volumes stay.`}
+          </p>
+          <div className="dialog-actions"><button className="btn" data-focus="first" type="button" onClick={() => setConfirmUpdate(false)}>Cancel</button><button className="btn primary" type="button" disabled={pending === "update"} onClick={() => void updateStack()}>{pending === "update" ? (adopting ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : "Updating…") : adopting ? (detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack") : "Update the stack"}</button></div>
         </Dialog>
       ) : null}
       {confirmDelete ? (
