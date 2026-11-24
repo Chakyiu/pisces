@@ -42,7 +42,7 @@ export function ComposeEditor({
         </button>
       </div>
       <p className="help compose-docs">You can get more information about the Compose file format in the <a href="https://docs.docker.com/compose/compose-file/" target="_blank" rel="noreferrer">official documentation</a>.</p>
-      <p id="compose-hint" className="help">This form sends the Compose file only. It does not upload a build directory or an env file. Images must be ones the engine can pull.</p>
+      <p id="compose-hint" className="help">This form does not upload a build directory. Set stack environment variables in the section below; Pisces writes <span className="mono">stack.env</span> for deploy. Images must be ones the engine can pull.</p>
       <div className="compose-well">
         <pre className="compose-gutter" aria-hidden="true" ref={gutter}>{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre>
         <textarea

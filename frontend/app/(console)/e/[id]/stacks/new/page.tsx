@@ -8,6 +8,8 @@ import { useConsole, PageFrame } from "../../../../../../components/shell";
 import { Dialog, Loading } from "../../../../../../components/bits";
 import { DockerView } from "../../../../../../components/gate";
 import { ComposeEditor } from "../compose-editor";
+import { StackEnvEditor, stackEnvPayload } from "../stack-env-editor";
+import type { EnvValue } from "../../../../../../lib/types";
 
 const NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
 const MAX_BYTES = 1_048_576;
@@ -35,6 +37,7 @@ export default function NewStackPage() {
   const endpointName = endpoint?.name ?? "this endpoint";
   const [name, setName] = useState("");
   const [compose, setCompose] = useState("");
+  const [env, setEnv] = useState<EnvValue[]>([]);
   const [nameErrorText, setNameErrorText] = useState("");
   const [composeError, setComposeError] = useState("");
   const [alert, setAlert] = useState("");
@@ -45,7 +48,7 @@ export default function NewStackPage() {
   const [lastAttempt, setLastAttempt] = useState("");
   const nameRef = useRef<HTMLInputElement>(null);
   const busy = useRef(false);
-  const dirty = Boolean(name || compose);
+  const dirty = Boolean(name || compose || env.some((row) => row.key || row.value));
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
@@ -84,7 +87,7 @@ export default function NewStackPage() {
     try {
       await api(`/api/endpoints/${id}/stacks`, {
         method: "POST",
-        body: { project: name, compose },
+        body: { project: name, compose, env: stackEnvPayload(env) },
         timeoutMs: 310_000,
         failureMessage: LOST_REQUEST,
       });
@@ -147,6 +150,7 @@ export default function NewStackPage() {
           disabled={submitting}
           error={composeError}
         />
+        <StackEnvEditor value={env} onChange={setEnv} disabled={submitting} />
         <div className="stack-status" role="status" aria-live="polite">
           {submitting && slow ? "Taking longer than expected. Image pulls can take a minute." : ""}
         </div>

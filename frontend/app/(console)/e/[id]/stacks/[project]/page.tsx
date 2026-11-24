@@ -10,6 +10,8 @@ import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../comp
 import { DockerView, Pager, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
 import { ComposeEditor } from "../compose-editor";
+import { StackEnvEditor, stackEnvPayload } from "../stack-env-editor";
+import type { EnvValue } from "../../../../../../lib/types";
 
 const LOST_REQUEST = "The console lost the deploy request. Check the stack list before trying again. The engine may still be applying it.";
 const MAX_BYTES = 1_048_576;
@@ -19,6 +21,10 @@ function fileError(value: string) {
   if (!value.trim()) return "Stack file content is required";
   if (new TextEncoder().encode(value).byteLength > MAX_BYTES) return "This file is larger than 1 MB. Pisces accepts Compose files up to 1 MB.";
   return "";
+}
+
+function envFingerprint(rows: EnvValue[]) {
+  return JSON.stringify(stackEnvPayload(rows));
 }
 
 type Tab = "stack" | "editor";
@@ -42,6 +48,8 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
   const router = useRouter();
   const [detail, setDetail] = useState<StackDetail | null>(null);
   const [compose, setCompose] = useState("");
+  const [env, setEnv] = useState<EnvValue[]>([]);
+  const [savedEnv, setSavedEnv] = useState("[]");
   const [tab, setTab] = useState<Tab>("stack");
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
@@ -59,9 +67,14 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [pendingHref, setPendingHref] = useState("");
   const adopting = Boolean(detail && (detail.origin === "discovered" || !detail.hasFile));
+  const envDirty = envFingerprint(env) !== savedEnv;
   const dirty = adopting
-    ? Boolean(compose.trim() && !fileError(compose))
-    : Boolean(detail?.origin === "managed" && detail.hasFile && compose !== (detail.compose ?? ""));
+    ? Boolean((compose.trim() && !fileError(compose)) || envDirty)
+    : Boolean(
+        detail?.origin === "managed" &&
+          detail.hasFile &&
+          (compose !== (detail.compose ?? "") || envDirty),
+      );
   const containers = detail?.containerDetails ?? [];
   const visible = containers.slice(offset, offset + 50);
   const selected = visible.filter((container) => picked[container.id]);
@@ -80,6 +93,9 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
       const value = await api<StackDetail>(`/api/endpoints/${id}/stacks/${encodeURIComponent(project)}`);
       setDetail(value);
       setCompose(value.compose ?? "");
+      const loaded = value.env ?? [];
+      setEnv(loaded);
+      setSavedEnv(envFingerprint(loaded));
       setStatus(new URLSearchParams(window.location.search).get("deployed") === "1" ? `Deployed ${project}.` : "");
     } catch (err) {
       if (err instanceof ApiError && err.code === "not_found") {
@@ -203,7 +219,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
     try {
       await api(`/api/endpoints/${id}/stacks/${encodeURIComponent(project)}`, {
         method: "PUT",
-        body: { project, compose },
+        body: { project, compose, env: stackEnvPayload(env) },
         timeoutMs: 310_000,
         failureMessage: LOST_REQUEST,
       });
@@ -310,6 +326,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
                   : <>Pisces has a record for {project} on {endpointName}, but the Compose file is missing. Paste a file below to store and redeploy it. The stack name stays <span className="mono" translate="no">{project}</span>.</>}
               </p>
               <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} error={compose.trim() && fileError(compose) ? fileError(compose) : ""} />
+              <StackEnvEditor value={env} onChange={setEnv} disabled={Boolean(pending)} />
               <div className="stack-editor-actions">
                 <button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>
                   {pending === "update" ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack"}
@@ -320,6 +337,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
             <>
               <p className="stack-note">The stack name stays <span className="mono" translate="no">{project}</span>.</p>
               <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} />
+              <StackEnvEditor value={env} onChange={setEnv} disabled={Boolean(pending)} />
               <div className="stack-editor-actions"><button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>{pending === "update" ? "Updating…" : "Update the stack"}</button></div>
             </>
           )}
