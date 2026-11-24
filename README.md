@@ -8,9 +8,11 @@ A Portainer-like web app for managing Docker from a browser: a **Next.js** front
 **Rust** backend that provides authenticated API control over the Docker daemon.
 
 The Docker console is what ships today: sign in, add this machine's engine, and
-start, stop, inspect, and remove containers, plus images, volumes, and networks.
-Kubernetes is not delivered yet — the Kubernetes nav routes render a "not in this build"
-placeholder, and the only Kubernetes thing that works is saving a context.
+start, stop, inspect, and remove containers, plus images, volumes, networks, and
+Compose stacks (deploy from a file, edit the stored compose, and adopt stacks the
+engine already knows about). Kubernetes is not delivered yet — the Kubernetes nav
+routes render a "not in this build" placeholder, and the only Kubernetes thing that
+works is saving a context.
 
 ## Screens
 
@@ -46,7 +48,7 @@ The backend accepts either form of the password. `PISCES_PASSWORD_HASH` (an argo
 
 `docker build -t pisces .` from this repo builds the same image. Use `pisces` in the command above instead of `ghcr.io/chakyiu/pisces:latest`.
 
-Pushes to `main` publish `ghcr.io/chakyiu/pisces:latest` and `ghcr.io/chakyiu/pisces:sha-<short>`. A `vX.Y.Z` git tag also publishes that version and `X.Y`.
+Images live on **GitHub Container Registry** at `ghcr.io/chakyiu/pisces` (not `ghrc.io` — that host is unrelated). Pushes to `main` publish `:latest` and `:sha-<short>`. A `vX.Y.Z` git tag also publishes that version and `X.Y`.
 
 ## AI access
 
@@ -108,7 +110,7 @@ frontend/   Next.js App Router app (TypeScript)
 - Docker Desktop, running, for anything that talks to Docker
 - A kubeconfig only if you actually want Kubernetes; no cluster is required to build
 
-## Dev loop (Windows, two terminals)
+## Dev loop (two terminals)
 
 Backend, from `backend/` — listens on `http://127.0.0.1:8787`. Set the variables
 in the shell before `cargo run`. Do not commit them.
@@ -122,28 +124,46 @@ Set at least one of them: neither password variable is a startup error. A value 
 not a PHC string in `PISCES_PASSWORD_HASH` is rejected at startup. The startup line
 reports which variable was used; the plaintext is never logged.
 
+macOS and Linux (bash):
+
+```bash
+export PISCES_USERNAME=admin
+export PISCES_PASSWORD=choose-a-dev-password
+export PISCES_JWT_SECRET=at-least-32-characters-for-local-dev-only
+
+cd backend
+cargo run -- hash-password   # optional; writes PISCES_PASSWORD_HASH instead
+cargo run
+
+cd ../frontend
+npm install
+npm run dev
+```
+
+Windows (PowerShell) — same variables, then:
+
 ```powershell
 cargo run -- hash-password
 cargo run
 ```
-
-Frontend, from `frontend/` — listens on `http://localhost:3000`. The browser talks to
-`/api/*` on that origin; Next proxies to `PISCES_API_URL` (default `http://127.0.0.1:8787`)
-so the session cookie stays on port 3000.
 
 ```powershell
 npm install
 npm run dev
 ```
 
+Frontend listens on `http://localhost:3000`. The browser talks to `/api/*` on that origin;
+Next proxies to `PISCES_API_URL` (default `http://127.0.0.1:8787`) so the session cookie
+stays on port 3000.
+
 Open `http://localhost:3000`, sign in, and add a Docker endpoint named `local`. The engine
 is always this machine. Endpoint names are stored in `PISCES_DATA_DIR` (default `data/`).
 
-Checks:
+Checks (any OS):
 
-```powershell
-cd backend;  cargo check
-cd frontend; npm run build
+```bash
+cd backend && cargo check
+cd ../frontend && npm run build
 ```
 
 ## Decisions
