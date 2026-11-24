@@ -39,14 +39,19 @@ export function ContainerLogs({
   }, [tail]);
 
   useEffect(() => {
+    let cancel = false;
+    api<ContainerDetail>(`/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}`)
+      .then((body) => { if (!cancel) onName?.(body.name); })
+      .catch(() => undefined);
+    return () => { cancel = true; };
+  }, [endpointId, containerId, reload, onName]);
+
+  useEffect(() => {
     // While following, the stream owns the pane: a reload must not replace the
     // lines it has been appending with a fresh one-shot snapshot.
     if (follow) return;
     let cancel = false;
     setStatus("loading");
-    api<ContainerDetail>(`/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}`)
-      .then((body) => { if (!cancel) onName?.(body.name); })
-      .catch(() => undefined);
     api<{ lines: LogLine[] }>(`/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}/logs?tail=${appliedTail}`)
       .then((body) => {
         if (cancel) return;
@@ -59,7 +64,7 @@ export function ContainerLogs({
         setStatus("error");
       });
     return () => { cancel = true; };
-  }, [endpointId, containerId, appliedTail, reload, onName, follow]);
+  }, [endpointId, containerId, appliedTail, reload, follow]);
 
   useEffect(() => {
     if (!follow) return;
@@ -67,41 +72,62 @@ export function ContainerLogs({
     let closed = false;
     let queued: LogLine[] = [];
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let opened: ReturnType<typeof setTimeout> | null = null;
     const flush = () => {
       timer = null;
       if (closed || queued.length === 0) return;
       const next = queued;
       queued = [];
+      setStatus("ready");
       setLines((prev) => {
         const merged = [...(prev ?? []), ...next];
         return merged.length > 2000 ? merged.slice(-2000) : merged;
       });
     };
+    const reveal = () => {
+      if (closed) return;
+      setStatus("ready");
+      setLines((prev) => prev ?? []);
+    };
+    setLines(null);
+    setStatus("loading");
     setFollowState("live");
     setFollowMessage("");
-    void streamLogs(`/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}/logs/stream?tail=0`, {
-      signal: ctrl.signal,
-      onLine: (line) => {
-        queued.push(line);
-        if (!timer) timer = setTimeout(flush, 200);
+    // tail matches the Lines control. Docker sends that history, then keeps the
+    // socket open, so follow starts with context instead of an empty pane.
+    void streamLogs(
+      `/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}/logs/stream?tail=${appliedTail}`,
+      {
+        signal: ctrl.signal,
+        onOpen: () => {
+          if (closed) return;
+          opened = setTimeout(reveal, 300);
+        },
+        onLine: (line) => {
+          queued.push(line);
+          if (!timer) timer = setTimeout(flush, 200);
+        },
+        onError: (text) => {
+          if (closed) return;
+          flush();
+          setFollowMessage(text);
+          setFollowState("error");
+          reveal();
+        },
       },
-      onError: (text) => {
-        if (closed) return;
-        flush();
-        setFollowMessage(text);
-        setFollowState("error");
-      },
-    }).then(() => {
+    ).then(() => {
       if (closed) return;
       flush();
       setFollowState((state) => (state === "error" ? "error" : "ended"));
+      reveal();
     });
     return () => {
       closed = true;
       if (timer) clearTimeout(timer);
+      if (opened) clearTimeout(opened);
       ctrl.abort();
     };
-  }, [follow, endpointId, containerId]);
+  }, [follow, endpointId, containerId, appliedTail, reload]);
 
   useEffect(() => {
     if (follow) endRef.current?.scrollIntoView({ block: "nearest" });

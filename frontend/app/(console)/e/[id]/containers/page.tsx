@@ -175,7 +175,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                     <td><Badge state={item.state} /></td>
                     <td><AiAccessBadge access={item.aiAccess} /></td>
                     <td>
-                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}/logs`} aria-label="Logs" title="Logs">
+                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label="Logs" title="Logs">
                         <Icon name="logs" />
                       </Link>
                     </td>

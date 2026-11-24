@@ -4,6 +4,7 @@ import type { LogLine } from "./types";
 // directly instead of `api()` — that helper aborts every call after 10 seconds.
 type StreamOptions = {
   signal: AbortSignal;
+  onOpen?: () => void;
   onLine: (line: LogLine) => void;
   onError: (message: string) => void;
 };
@@ -16,6 +17,8 @@ export async function streamLogs(path: string, options: StreamOptions): Promise<
     if (!options.signal.aborted) options.onError("The log stream did not start.");
     return;
   }
+
+  if (res.ok && res.body && !options.signal.aborted) options.onOpen?.();
 
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");
