@@ -169,6 +169,8 @@ struct NetworkBody {
 struct StackBody {
     project: String,
     compose: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<Vec<docker::EnvOut>>,
 }
 
 #[derive(Serialize)]
@@ -185,6 +187,8 @@ struct StackView {
     container_details: Vec<docker::ContainerOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     compose: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env: Option<Vec<docker::EnvOut>>,
 }
 
 #[derive(Serialize)]
@@ -1440,6 +1444,7 @@ fn stack_views(
                 containers: stack.containers,
                 container_details: Vec::new(),
                 compose: None,
+                env: None,
             }
         })
         .collect();
@@ -1456,6 +1461,7 @@ fn stack_views(
                 containers: Vec::new(),
                 container_details: Vec::new(),
                 compose: None,
+                env: None,
             });
         }
     }
@@ -1502,6 +1508,28 @@ async fn create_stack(
         .into_response())
 }
 
+fn stack_env_for_apply(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let staged = stacks::staged_env_file(dir);
+    if staged.is_file() {
+        return Some(staged);
+    }
+    let committed = stacks::committed_env_file(dir);
+    committed.is_file().then_some(committed)
+}
+
+fn stage_stack_env_from_body(
+    state: &AppState,
+    endpoint_id: &str,
+    project: &str,
+    env: &[docker::EnvOut],
+) -> Result<(), ApiError> {
+    stacks::validate_stack_env(env)?;
+    let text = stacks::format_stack_env(env);
+    lock(state)
+        .stage_stack_env(endpoint_id, project, &text)
+        .map_err(ApiError::daemon)
+}
+
 async fn apply_stack_create(
     state: &AppState,
     endpoint: &Endpoint,
@@ -1527,8 +1555,22 @@ async fn apply_stack_create(
     lock(state)
         .stage_stack_file(&endpoint.id, &body.project, &body.compose)
         .map_err(ApiError::daemon)?;
+    stage_stack_env_from_body(
+        state,
+        &endpoint.id,
+        &body.project,
+        body.env.as_deref().unwrap_or_default(),
+    )?;
     let candidate = dir.join("compose.yaml.new");
-    if let Err(error) = stacks::up(&body.project, &dir, &candidate).await {
+    let env_file = stack_env_for_apply(&dir);
+    if let Err(error) = stacks::up(
+        &body.project,
+        &dir,
+        &candidate,
+        env_file.as_deref(),
+    )
+    .await
+    {
         lock(state).keep_failed_create(&endpoint.id, &body.project, &error.message);
         return Err(error);
     }
@@ -1550,13 +1592,18 @@ async fn get_stack(
         .iter()
         .position(|stack| stack.project == project)
         .map(|index| live.remove(index));
-    let (compose, is_managed) = {
+    let (compose, stack_env, is_managed) = {
         let guard = lock(&state);
         (
             guard.stack_file(&endpoint.id, &project),
+            guard.stack_env_file(&endpoint.id, &project),
             guard.stack_exists(&endpoint.id, &project),
         )
     };
+    let stored_env = stack_env
+        .as_deref()
+        .map(stacks::parse_stack_env)
+        .filter(|entries| !entries.is_empty());
     let exists = is_managed;
     if stack.is_none() && !exists {
         return Err(ApiError::not_found(format!("{project} was not found.")));
@@ -1585,6 +1632,7 @@ async fn get_stack(
             containers: stack.containers,
             container_details,
             compose,
+            env: stored_env.clone(),
         }
     } else {
         StackView {
@@ -1597,11 +1645,17 @@ async fn get_stack(
             containers: Vec::new(),
             container_details: Vec::new(),
             compose,
+            env: stored_env,
         }
     };
     if principal.is_agent() {
         if let Some(compose) = view.compose.take() {
             view.compose = Some(access::redact_compose(&compose));
+        }
+        if let Some(env) = view.env.as_mut() {
+            for entry in env {
+                entry.value.clear();
+            }
         }
     }
     Ok(Json(view))
@@ -1678,8 +1732,17 @@ async fn apply_stack_update(
         lock(state)
             .stage_stack_file(&endpoint.id, &project, &body.compose)
             .map_err(ApiError::daemon)?;
+        if body.env.is_some() {
+            stage_stack_env_from_body(
+                state,
+                &endpoint.id,
+                &project,
+                body.env.as_deref().unwrap_or_default(),
+            )?;
+        }
         let candidate = dir.join("compose.yaml.new");
-        if let Err(error) = stacks::up(&project, &dir, &candidate).await {
+        let env_file = stack_env_for_apply(&dir);
+        if let Err(error) = stacks::up(&project, &dir, &candidate, env_file.as_deref()).await {
             lock(state).keep_failed_create(&endpoint.id, &project, &error.message);
             return Err(error);
         }
@@ -1694,8 +1757,25 @@ async fn apply_stack_update(
     lock(state)
         .stage_stack_file(&endpoint.id, &project, &body.compose)
         .map_err(ApiError::daemon)?;
-    if let Err(error) = stacks::up(&project, &dir, &dir.join("compose.yaml.new")).await {
+    if body.env.is_some() {
+        stage_stack_env_from_body(
+            state,
+            &endpoint.id,
+            &project,
+            body.env.as_deref().unwrap_or_default(),
+        )?;
+    }
+    let env_file = stack_env_for_apply(&dir);
+    if let Err(error) = stacks::up(
+        &project,
+        &dir,
+        &dir.join("compose.yaml.new"),
+        env_file.as_deref(),
+    )
+    .await
+    {
         let _ = std::fs::remove_file(dir.join("compose.yaml.new"));
+        let _ = std::fs::remove_file(stacks::staged_env_file(&dir));
         lock(state).record_stack_error(&endpoint.id, &project, &error.message);
         return Err(error);
     }
@@ -1719,7 +1799,14 @@ async fn delete_stack(
             let dir = lock(&state)
                 .create_stack_dir(&endpoint.id, &project)
                 .map_err(ApiError::daemon)?;
-            stacks::down(&project, &dir, &dir.join("compose.yaml")).await?;
+            let env_file = stack_env_for_apply(&dir);
+            stacks::down(
+                &project,
+                &dir,
+                &dir.join("compose.yaml"),
+                env_file.as_deref(),
+            )
+            .await?;
         } else if let Some(stack) = docker::list_stacks("")
             .await?
             .into_iter()
@@ -2658,6 +2745,7 @@ mod console_tests {
             Ok(Json(StackBody {
                 project: "../unsafe".to_string(),
                 compose: "services:\n  web:\n    image: nginx\n".to_string(),
+                env: None,
             })),
         )
         .await;
@@ -2681,6 +2769,7 @@ mod console_tests {
             Ok(Json(StackBody {
                 project: "different".to_string(),
                 compose: "services:\n  web:\n    image: nginx\n".to_string(),
+                env: None,
             })),
         )
         .await;

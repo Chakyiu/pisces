@@ -53,6 +53,7 @@ export type Stack = {
 
 export type StackDetail = Stack & {
   compose?: string | null;
+  env?: EnvValue[] | null;
   containerDetails?: Container[];
 };
 

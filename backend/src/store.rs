@@ -120,6 +120,52 @@ impl Store {
         fs::read_to_string(self.stack_dir(endpoint_id, project)?.join("compose.yaml")).ok()
     }
 
+    pub fn stack_env_file(&self, endpoint_id: &str, project: &str) -> Option<String> {
+        let dir = self.stack_dir(endpoint_id, project)?;
+        fs::read_to_string(dir.join("stack.env"))
+            .or_else(|_| fs::read_to_string(dir.join("stack.env.new")))
+            .ok()
+    }
+
+    pub fn stage_stack_env(
+        &self,
+        endpoint_id: &str,
+        project: &str,
+        content: &str,
+    ) -> Result<(), String> {
+        let dir = self
+            .stack_dir(endpoint_id, project)
+            .ok_or_else(|| "That stack name is not valid.".to_string())?;
+        fs::create_dir_all(&dir)
+            .map_err(|_| "The stack directory could not be created.".to_string())?;
+        if content.is_empty() {
+            let staged = dir.join("stack.env.new");
+            if staged.is_file() {
+                fs::remove_file(staged)
+                    .map_err(|_| "The stack environment file could not be updated.".to_string())?;
+            }
+            return Ok(());
+        }
+        fs::write(dir.join("stack.env.new"), content)
+            .map_err(|_| "The stack environment file could not be saved.".to_string())
+    }
+
+    pub fn commit_stack_env(&self, endpoint_id: &str, project: &str) -> Result<(), String> {
+        let dir = self
+            .stack_dir(endpoint_id, project)
+            .ok_or_else(|| "That stack name is not valid.".to_string())?;
+        let staged = dir.join("stack.env.new");
+        let committed = dir.join("stack.env");
+        if staged.is_file() {
+            replace_file(&staged, &committed)
+                .map_err(|_| "The stack environment file could not be saved.".to_string())?;
+        } else if committed.is_file() {
+            fs::remove_file(committed)
+                .map_err(|_| "The stack environment file could not be saved.".to_string())?;
+        }
+        Ok(())
+    }
+
     pub fn stack_exists(&self, endpoint_id: &str, project: &str) -> bool {
         self.stack_dir(endpoint_id, project)
             .is_some_and(|dir| dir.is_dir())
@@ -155,6 +201,7 @@ impl Store {
             .ok_or_else(|| "That stack name is not valid.".to_string())?;
         replace_file(&dir.join("compose.yaml.new"), &dir.join("compose.yaml"))
             .map_err(|_| "The Compose file could not be saved.".to_string())?;
+        self.commit_stack_env(endpoint_id, project)?;
         self.save_stack_meta(endpoint_id, project, None)
     }
 

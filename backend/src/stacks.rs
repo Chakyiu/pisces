@@ -1,8 +1,9 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use tokio::process::Command;
 
+use crate::docker::EnvOut;
 use crate::error::ApiError;
 
 pub const MAX_COMPOSE_BYTES: usize = 1_048_576;
@@ -55,28 +56,91 @@ pub fn validate_compose(compose: &str) -> Result<(), ApiError> {
         if rest.is_empty() && !key.contains(':') {
             continue;
         }
-        if matches!(name.trim(), "build" | "env_file" | "extends") {
+        if matches!(name.trim(), "build" | "extends") {
             return Err(ApiError::validation(format!(
                 "The Compose key '{}' is not supported. Use images the engine can pull and include settings in this file.",
                 name.trim()
             )));
         }
+        if name.trim() == "env_file" && !line.contains("stack.env") {
+            return Err(ApiError::validation(
+                "Only env_file: stack.env is supported. Set environment values in the stack form instead of other env files.",
+            ));
+        }
     }
     Ok(())
 }
 
-pub async fn up(project: &str, directory: &Path, compose_file: &Path) -> Result<(), ApiError> {
-    run(project, directory, compose_file, "up").await
+pub fn validate_stack_env(entries: &[EnvOut]) -> Result<(), ApiError> {
+    for entry in entries {
+        if entry.key.is_empty()
+            || entry.key.contains('=')
+            || entry.key.contains('\n')
+            || entry.key.contains('\r')
+        {
+            return Err(ApiError::validation(
+                "Environment variable names must be non-empty and cannot contain '=', or newlines.",
+            ));
+        }
+    }
+    Ok(())
 }
 
-pub async fn down(project: &str, directory: &Path, compose_file: &Path) -> Result<(), ApiError> {
-    run(project, directory, compose_file, "down").await
+pub fn format_stack_env(entries: &[EnvOut]) -> String {
+    entries
+        .iter()
+        .filter(|entry| !entry.key.trim().is_empty())
+        .map(|entry| format!("{}={}", entry.key, entry.value))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+pub fn parse_stack_env(content: &str) -> Vec<EnvOut> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (key, value) = line
+            .split_once('=')
+            .map(|(key, value)| (key.trim(), value))
+            .unwrap_or((line, ""));
+        if !key.is_empty() {
+            entries.push(EnvOut {
+                key: key.to_string(),
+                value: value.to_string(),
+            });
+        }
+    }
+    entries
+}
+
+pub async fn up(
+    project: &str,
+    directory: &Path,
+    compose_file: &Path,
+    env_file: Option<&Path>,
+) -> Result<(), ApiError> {
+    run(project, directory, compose_file, env_file, "up").await
+}
+
+pub async fn down(
+    project: &str,
+    directory: &Path,
+    compose_file: &Path,
+    env_file: Option<&Path>,
+) -> Result<(), ApiError> {
+    run(project, directory, compose_file, env_file, "down").await
 }
 
 async fn run(
     project: &str,
     directory: &Path,
     compose_file: &Path,
+    env_file: Option<&Path>,
     action: &str,
 ) -> Result<(), ApiError> {
     let mut command = Command::new("docker");
@@ -87,7 +151,11 @@ async fn run(
         .arg("--project-name")
         .arg(project)
         .arg("--file")
-        .arg(compose_file)
+        .arg(compose_file);
+    if let Some(path) = env_file.filter(|path| path.is_file()) {
+        command.arg("--env-file").arg(path);
+    }
+    command
         .arg(action)
         .args(if action == "up" {
             vec!["--detach", "--remove-orphans"]
@@ -145,7 +213,37 @@ mod tests {
         assert!(validate_compose("services:\n  web:\n    image: nginx\n").is_ok());
         assert!(validate_compose("services:\n  web:\n    build: .\n").is_err());
         assert!(validate_compose("services:\n  web:\n    env_file: .env\n").is_err());
+        assert!(validate_compose("services:\n  web:\n    env_file: stack.env\n").is_ok());
         assert!(validate_compose("# comment only\n").is_err());
         assert!(validate_compose(&"x".repeat(MAX_COMPOSE_BYTES + 1)).is_err());
     }
+
+    #[test]
+    fn round_trips_stack_env_file_format() {
+        let entries = vec![
+            EnvOut {
+                key: "TAG".into(),
+                value: "v1".into(),
+            },
+            EnvOut {
+                key: "PORT".into(),
+                value: "8080".into(),
+            },
+        ];
+        let text = format_stack_env(&entries);
+        let parsed = parse_stack_env(&text);
+        assert_eq!(parsed.len(), entries.len());
+        for (got, expected) in parsed.iter().zip(entries.iter()) {
+            assert_eq!(got.key, expected.key);
+            assert_eq!(got.value, expected.value);
+        }
+    }
+}
+
+pub fn staged_env_file(directory: &Path) -> PathBuf {
+    directory.join("stack.env.new")
+}
+
+pub fn committed_env_file(directory: &Path) -> PathBuf {
+    directory.join("stack.env")
 }
