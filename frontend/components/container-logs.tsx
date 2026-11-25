@@ -6,18 +6,22 @@ import { streamLogs } from "../lib/log-stream";
 import type { ContainerDetail, LogLine } from "../lib/types";
 import { Icon } from "./bits";
 
+export const CONTAINER_LOGS_SECTION_ID = "container-logs";
+
 export function ContainerLogs({
   endpointId,
   containerId,
   reload,
   onName,
   defaultFollow = false,
+  sectionId = CONTAINER_LOGS_SECTION_ID,
 }: {
   endpointId: string;
   containerId: string;
   reload: number;
   onName?: (name: string) => void;
   defaultFollow?: boolean;
+  sectionId?: string;
 }) {
   const [lines, setLines] = useState<LogLine[] | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -147,7 +151,7 @@ export function ContainerLogs({
   }
 
   return (
-    <section className="widget">
+    <section id={sectionId} className="widget">
       <h2><span className="widget-title"><Icon name="logs" /> Log viewer settings</span></h2>
       <div className="setting">
         <span>Wrap lines</span>

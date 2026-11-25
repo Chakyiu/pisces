@@ -1,6 +1,6 @@
 "use client";
 
-import { type KeyboardEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
@@ -8,13 +8,11 @@ import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerAiAccess } from "../../../../../../components/container-ai-access";
 import { ContainerConsole } from "../../../../../../components/container-console";
-import { ContainerLogs } from "../../../../../../components/container-logs";
+import { CONTAINER_LOGS_SECTION_ID, ContainerLogs } from "../../../../../../components/container-logs";
 import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
 import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
-
-type ContainerTab = "details" | "logs";
 
 export default function ContainerDetailPage() {
   const params = useParams<{ id: string; containerId: string }>();
@@ -67,25 +65,18 @@ function Body({
   const [editOpen, setEditOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
-  const [tab, setTab] = useState<ContainerTab>(() => (searchParams.get("tab") === "logs" ? "logs" : "details"));
 
   useEffect(() => {
-    setTab(searchParams.get("tab") === "logs" ? "logs" : "details");
-  }, [searchParams]);
-
-  function chooseTab(next: ContainerTab) {
-    setTab(next);
-    const base = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
-    router.replace(next === "logs" ? `${base}?tab=logs` : base);
-  }
-
-  function tabKey(event: KeyboardEvent<HTMLDivElement>) {
-    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next: ContainerTab = event.key === "Home" || event.key === "ArrowLeft" ? "details" : "logs";
-    chooseTab(next);
-    document.getElementById(`container-tab-${next}`)?.focus();
-  }
+    if (status !== "ready") return;
+    const legacyLogsTab = searchParams.get("tab") === "logs";
+    const hashLogs = typeof window !== "undefined" && window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`;
+    if (!legacyLogsTab && !hashLogs) return;
+    document.getElementById(CONTAINER_LOGS_SECTION_ID)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (legacyLogsTab) {
+      const base = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
+      router.replace(hashLogs ? `${base}#${CONTAINER_LOGS_SECTION_ID}` : base, { scroll: false });
+    }
+  }, [status, searchParams, endpointId, containerId, router]);
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -183,37 +174,6 @@ function Body({
   return (
     <div className="stack">
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
-      <div className="stack-tabs" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
-        <button
-          id="container-tab-details"
-          className="stack-tab"
-          type="button"
-          role="tab"
-          aria-selected={tab === "details"}
-          aria-controls="container-panel-details"
-          onClick={() => chooseTab("details")}
-        >
-          Details
-        </button>
-        <button
-          id="container-tab-logs"
-          className="stack-tab"
-          type="button"
-          role="tab"
-          aria-selected={tab === "logs"}
-          aria-controls="container-panel-logs"
-          onClick={() => chooseTab("logs")}
-        >
-          Logs
-        </button>
-      </div>
-      <section
-        id="container-panel-details"
-        className="stack-panel"
-        role="tabpanel"
-        aria-labelledby="container-tab-details"
-        hidden={tab !== "details"}
-      >
       <section className="widget">
         <h2>Actions</h2>
         <div className="widget-pad">
@@ -280,23 +240,12 @@ function Body({
           <Fact label="Started" value={stamp(detail.started)} mono />
         </div>
       </section>
-      </section>
-      <section
-        id="container-panel-logs"
-        className="stack-panel"
-        role="tabpanel"
-        aria-labelledby="container-tab-logs"
-        hidden={tab !== "logs"}
-      >
-        {tab === "logs" ? (
-          <ContainerLogs
-            endpointId={endpointId}
-            containerId={containerId}
-            reload={reload}
-            defaultFollow={isRunning}
-          />
-        ) : null}
-      </section>
+      <ContainerLogs
+        endpointId={endpointId}
+        containerId={containerId}
+        reload={reload}
+        defaultFollow={isRunning}
+      />
       {confirm ? (
         <Dialog title={`Remove ${detail.name}?`} onClose={() => setConfirm(false)}>
           <p>
