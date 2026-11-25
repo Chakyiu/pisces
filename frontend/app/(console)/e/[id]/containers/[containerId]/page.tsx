@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
@@ -13,6 +13,16 @@ import { ContainerDuplicateDialog } from "../../../../../../components/container
 import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
 import { DockerView, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
+
+type ContainerTab = "logs" | "inspect" | "stats" | "console" | "attach";
+
+const CONTAINER_TABS: ContainerTab[] = ["logs", "inspect", "stats", "console", "attach"];
+
+function tabFromQuery(raw: string | null): ContainerTab | null {
+  if (raw === "logs" || raw === "inspect" || raw === "stats" || raw === "console" || raw === "attach") return raw;
+  if (raw === "details") return "inspect";
+  return null;
+}
 
 export default function ContainerDetailPage() {
   const params = useParams<{ id: string; containerId: string }>();
@@ -61,22 +71,61 @@ function Body({
   const [pending, setPending] = useState("");
   const [alert, setAlert] = useState("");
   const [confirm, setConfirm] = useState(false);
-  const [consoleOpen, setConsoleOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
+  const [tab, setTab] = useState<ContainerTab>("inspect");
+
+  const detailPath = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
+
+  function chooseTab(next: ContainerTab) {
+    setTab(next);
+    if (next === "logs") {
+      router.replace(`${detailPath}#${CONTAINER_LOGS_SECTION_ID}`, { scroll: false });
+    } else if (next === "inspect") {
+      router.replace(detailPath, { scroll: false });
+    } else {
+      router.replace(`${detailPath}?tab=${next}`, { scroll: false });
+    }
+  }
+
+  function tabKey(event: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const index = CONTAINER_TABS.indexOf(tab);
+    let next: ContainerTab;
+    if (event.key === "Home") next = CONTAINER_TABS[0];
+    else if (event.key === "End") next = CONTAINER_TABS[CONTAINER_TABS.length - 1];
+    else if (event.key === "ArrowLeft") next = CONTAINER_TABS[Math.max(0, index - 1)];
+    else next = CONTAINER_TABS[Math.min(CONTAINER_TABS.length - 1, index + 1)];
+    chooseTab(next);
+    document.getElementById(`container-tab-${next}`)?.focus();
+  }
 
   useEffect(() => {
     if (status !== "ready") return;
-    const legacyLogsTab = searchParams.get("tab") === "logs";
     const hashLogs = typeof window !== "undefined" && window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`;
-    if (!legacyLogsTab && !hashLogs) return;
-    document.getElementById(CONTAINER_LOGS_SECTION_ID)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    if (legacyLogsTab) {
-      const base = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
-      router.replace(hashLogs ? `${base}#${CONTAINER_LOGS_SECTION_ID}` : base, { scroll: false });
+    const fromQuery = tabFromQuery(searchParams.get("tab"));
+    if (hashLogs) {
+      setTab("logs");
+      return;
     }
-  }, [status, searchParams, endpointId, containerId, router]);
+    if (fromQuery) {
+      setTab(fromQuery);
+      if (fromQuery === "logs") {
+        router.replace(`${detailPath}#${CONTAINER_LOGS_SECTION_ID}`, { scroll: false });
+      }
+    }
+  }, [status, searchParams, detailPath, router]);
+
+  useEffect(() => {
+    if (status !== "ready") return;
+    const onHash = () => {
+      if (window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`) setTab("logs");
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, [status]);
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -174,78 +223,159 @@ function Body({
   return (
     <div className="stack">
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
-      <section className="widget">
-        <h2>Actions</h2>
-        <div className="widget-pad">
-          <div className="bulk">
-            <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
-              <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending) || !isRunning} onClick={() => void act("stop")}>
-              <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
-              <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
-            </button>
-            <button className="btn" type="button" title="Open container console" aria-expanded={consoleOpen} aria-controls="container-console" disabled={Boolean(pending) || !isRunning} onClick={() => setConsoleOpen((open) => !open)}>
-              <Icon name="console" /> Console
-            </button>
-            <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
-              <Icon name="trash" /> Remove
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
-              <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
-              Edit name / restart
-            </button>
-            <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
-              <Icon name="copy" /> Duplicate/Edit
-            </button>
+      <div className="stack-tabs" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
+        {CONTAINER_TABS.map((key) => (
+          <button
+            key={key}
+            id={`container-tab-${key}`}
+            className="stack-tab"
+            type="button"
+            role="tab"
+            aria-selected={tab === key}
+            aria-controls={`container-panel-${key}`}
+            onClick={() => chooseTab(key)}
+          >
+            {key === "logs" ? <><Icon name="logs" /> Logs</> : null}
+            {key === "inspect" ? <><Icon name="eye" /> Inspect</> : null}
+            {key === "stats" ? "Stats" : null}
+            {key === "console" ? <><Icon name="console" /> Console</> : null}
+            {key === "attach" ? "Attach" : null}
+          </button>
+        ))}
+      </div>
+      <section
+        id="container-panel-inspect"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-inspect"
+        hidden={tab !== "inspect"}
+      >
+        <section className="widget">
+          <h2>Actions</h2>
+          <div className="widget-pad">
+            <div className="bulk">
+              <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
+                <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending) || !isRunning} onClick={() => void act("stop")}>
+                <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
+                <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
+              </button>
+              <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
+                <Icon name="trash" /> Remove
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
+                <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
+                Edit name / restart
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
+                <Icon name="copy" /> Duplicate/Edit
+              </button>
+            </div>
           </div>
-        </div>
+        </section>
+        <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
+        <section className="widget">
+          <h2>Status</h2>
+          <div className="facts">
+            <Fact label="Name" value={detail.name} />
+            <div className="fact"><span>State</span><Badge state={detail.state} /></div>
+            <Fact label="Status" value={blank(detail.statusText)} />
+          </div>
+        </section>
+        <section className="widget">
+          <h2>Details</h2>
+          <div className="facts">
+            <Fact label="ID" value={detail.id} mono />
+            <Fact label="Image" value={detail.image} mono />
+            <Fact label="Command" value={blank(detail.command)} mono />
+            <Fact label="Entrypoint" value={blank(detail.entrypoint)} mono />
+            <Fact label="Restart" value={`${detail.restartPolicy || "no"}${detail.restartMaximumRetryCount == null ? "" : ` · ${detail.restartMaximumRetryCount} retries`}`} />
+            <Fact label="Ports" value={portList(detail.ports)} mono />
+            <Fact label="Mounts" value={mounts} />
+            <Fact label="Networks" value={networks} />
+            <MaskedEnvironment items={detail.env} />
+            <Fact label="Labels" value={detail.labels.length ? detail.labels.map(({ key, value }) => `${key} = ${value}`).join("\n") : "None"} mono />
+            <Fact label="Image ID" value={detail.imageId} mono />
+            <Fact label="Created" value={stamp(detail.created)} mono />
+            <Fact label="Started" value={stamp(detail.started)} mono />
+          </div>
+        </section>
       </section>
-      {consoleOpen ? (
-        <ContainerConsole
-          endpointId={endpointId}
-          containerId={containerId}
-          running={isRunning}
-          onClose={() => setConsoleOpen(false)}
-        />
-      ) : null}
-      <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
-      <section className="widget">
-        <h2>Status</h2>
-        <div className="facts">
-          <Fact label="Name" value={detail.name} />
-          <div className="fact"><span>State</span><Badge state={detail.state} /></div>
-          <Fact label="Status" value={blank(detail.statusText)} />
-        </div>
+      <section
+        id="container-panel-logs"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-logs"
+        hidden={tab !== "logs"}
+      >
+        {tab === "logs" ? (
+          <ContainerLogs
+            endpointId={endpointId}
+            containerId={containerId}
+            reload={reload}
+            defaultFollow={isRunning}
+          />
+        ) : null}
       </section>
-      <section className="widget">
-        <h2>Details</h2>
-        <div className="facts">
-          <Fact label="ID" value={detail.id} mono />
-          <Fact label="Image" value={detail.image} mono />
-          <Fact label="Command" value={blank(detail.command)} mono />
-          <Fact label="Entrypoint" value={blank(detail.entrypoint)} mono />
-          <Fact label="Restart" value={`${detail.restartPolicy || "no"}${detail.restartMaximumRetryCount == null ? "" : ` · ${detail.restartMaximumRetryCount} retries`}`} />
-          <Fact label="Ports" value={portList(detail.ports)} mono />
-          <Fact label="Mounts" value={mounts} />
-          <Fact label="Networks" value={networks} />
-          <MaskedEnvironment items={detail.env} />
-          <Fact label="Labels" value={detail.labels.length ? detail.labels.map(({ key, value }) => `${key} = ${value}`).join("\n") : "None"} mono />
-          <Fact label="Image ID" value={detail.imageId} mono />
-          <Fact label="Created" value={stamp(detail.created)} mono />
-          <Fact label="Started" value={stamp(detail.started)} mono />
-        </div>
+      <section
+        id="container-panel-stats"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-stats"
+        hidden={tab !== "stats"}
+      >
+        {tab === "stats" ? (
+          <ContainerViewSoon
+            title="Container stats are not available yet"
+            body="Live CPU, memory, and network charts for this container are not in this Pisces build. Use Inspect for container metadata or Logs for output."
+          />
+        ) : null}
       </section>
-      <ContainerLogs
-        endpointId={endpointId}
-        containerId={containerId}
-        reload={reload}
-        defaultFollow={isRunning}
-      />
+      <section
+        id="container-panel-console"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-console"
+        hidden={tab !== "console"}
+      >
+        {tab === "console" ? (
+          isRunning ? (
+            <ContainerConsole
+              endpointId={endpointId}
+              containerId={containerId}
+              running={isRunning}
+              onClose={() => chooseTab("inspect")}
+            />
+          ) : (
+            <div className="state">
+              <h2>Console needs a running container</h2>
+              <p>{detail.name} is {detail.state}. Start it, then open Console again.</p>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("start")}>
+                <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+              </button>
+            </div>
+          )
+        ) : null}
+      </section>
+      <section
+        id="container-panel-attach"
+        className="stack-panel"
+        role="tabpanel"
+        aria-labelledby="container-tab-attach"
+        hidden={tab !== "attach"}
+      >
+        {tab === "attach" ? (
+          <ContainerViewSoon
+            title="Attach is not available yet"
+            body="Streaming attach to a running process stdin is not in this Pisces build. Use Console for an interactive shell when the container is running."
+          />
+        ) : null}
+      </section>
       {confirm ? (
         <Dialog title={`Remove ${detail.name}?`} onClose={() => setConfirm(false)}>
           <p>
@@ -302,6 +432,16 @@ function Body({
           }}
         />
       ) : null}
+    </div>
+  );
+}
+
+function ContainerViewSoon({ title, body }: { title: string; body: string }) {
+  return (
+    <div className="state placeholder-panel">
+      <span className="badge warn"><i className="sq warn" />not in this build</span>
+      <h2>{title}</h2>
+      <p>{body}</p>
     </div>
   );
 }
