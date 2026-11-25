@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { useConsole, PageFrame } from "../../../../../../components/shell";
@@ -45,6 +44,7 @@ export default function NewStackPage() {
   const [submitting, setSubmitting] = useState(false);
   const [slow, setSlow] = useState(false);
   const [leave, setLeave] = useState(false);
+  const [pendingHref, setPendingHref] = useState("");
   const [failures, setFailures] = useState(0);
   const [lastAttempt, setLastAttempt] = useState("");
   const nameRef = useRef<HTMLInputElement>(null);
@@ -58,8 +58,25 @@ export default function NewStackPage() {
         event.returnValue = "";
       }
     }
+    function interceptLink(event: MouseEvent) {
+      if (!dirty) return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const anchor = target.closest<HTMLAnchorElement>("a[href]");
+      if (!anchor || anchor.target === "_blank") return;
+      const url = new URL(anchor.href, window.location.href);
+      if (url.origin !== window.location.origin || `${url.pathname}${url.search}` === `${window.location.pathname}${window.location.search}`) return;
+      event.preventDefault();
+      event.stopPropagation();
+      setPendingHref(`${url.pathname}${url.search}${url.hash}`);
+      setLeave(true);
+    }
     window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
+    document.addEventListener("click", interceptLink, true);
+    return () => {
+      window.removeEventListener("beforeunload", beforeUnload);
+      document.removeEventListener("click", interceptLink, true);
+    };
   }, [dirty]);
 
   if (!endpoint) return <PageFrame title="Add stack" crumbs={[{ label: "Stacks" }, { label: "Add stack" }]}><Loading noun="endpoint" /></PageFrame>;
@@ -165,8 +182,8 @@ export default function NewStackPage() {
         <Dialog title="Leave this page?" onClose={() => setLeave(false)}>
           <p>The stack has not been deployed.</p>
           <div className="dialog-actions">
-            <button className="btn" data-focus="first" type="button" onClick={() => setLeave(false)}>Stay</button>
-            <Link className="btn primary" href={`/e/${id}/stacks`}>Leave</Link>
+            <button className="btn" data-focus="first" type="button" onClick={() => { setLeave(false); setPendingHref(""); }}>Stay</button>
+            <button className="btn primary" type="button" onClick={() => router.push(pendingHref || `/e/${id}/stacks`)}>Leave</button>
           </div>
         </Dialog>
       ) : null}

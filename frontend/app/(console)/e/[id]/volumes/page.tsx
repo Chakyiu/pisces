@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, api } from "../../../../../lib/api";
 import { stamp } from "../../../../../lib/format";
 import type { Volume } from "../../../../../lib/types";
+import { listedNames } from "../../../../../lib/ux";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
@@ -31,7 +32,9 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const [offset, setOffset] = useState(0);
   const [create, setCreate] = useState(false);
   const [volumeName, setVolumeName] = useState("");
+  const [nameError, setNameError] = useState("");
   const [driver, setDriver] = useState("local");
+  const [copied, setCopied] = useState("");
   const [picked, setPicked] = useState<Record<string, Volume>>({});
   const [remove, setRemove] = useState<Volume[] | null>(null);
   const [alert, setAlert] = useState("");
@@ -45,6 +48,15 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const items = query.data?.items ?? [];
   const selected = items.filter((item) => picked[item.name]);
   const allChecked = items.length > 0 && selected.length === items.length;
+
+  function submitVolume(event: FormEvent) {
+    event.preventDefault();
+    if (!volumeName.trim()) {
+      setNameError("Name is required.");
+      return;
+    }
+    void createVolume();
+  }
 
   async function createVolume() {
     setPending(true);
@@ -87,7 +99,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
         <div className="widget-head">
           <input className="field search" placeholder="name" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
-          <button className="btn primary" type="button" onClick={() => { setVolumeName(""); setDriver("local"); setCreate(true); }}>
+          <button className="btn primary" type="button" onClick={() => { setVolumeName(""); setNameError(""); setDriver("local"); setCreate(true); }}>
             <Icon name="plus" /> Create volume
           </button>
           <button className="btn danger" type="button" disabled={pending || selected.length === 0} onClick={() => setRemove(selected)}>
@@ -116,7 +128,20 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                     <td className="col-check"><label className="check"><input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.name])} onChange={() => setPicked((prev) => { const next = { ...prev }; if (next[item.name]) delete next[item.name]; else next[item.name] = item; return next; })} /></label></td>
                     <td className="name-cell" title={item.name}>{item.name}</td>
                     <td className="mono">{item.driver}</td>
-                    <td className="mono name-cell" title={item.mountpoint}>{item.mountpoint}</td>
+                    <td className="mono name-cell" title={item.mountpoint}>
+                      {item.mountpoint}
+                      <button
+                        className="icon-btn"
+                        type="button"
+                        aria-label={`Copy mountpoint for ${item.name}`}
+                        title={copied === item.name ? "Copied" : "Copy mountpoint"}
+                        onClick={() => {
+                          void navigator.clipboard.writeText(item.mountpoint).then(() => setCopied(item.name)).catch(() => setCopied(""));
+                        }}
+                      >
+                        <Icon name="copy" />
+                      </button>
+                    </td>
                     <td className="mono">{stamp(item.created)}</td>
                   </tr>
                 ))}
@@ -128,17 +153,27 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       </section>
       {create ? (
         <Dialog title="Create volume" onClose={() => setCreate(false)}>
-          <label className="label">Name<input className="field" value={volumeName} onChange={(event) => setVolumeName(event.target.value)} /></label>
-          <label className="label">Driver<input className="field" value={driver} onChange={(event) => setDriver(event.target.value)} /></label>
-          <div className="dialog-actions">
-            <button className="btn" type="button" onClick={() => setCreate(false)}>Cancel</button>
-            <button className="btn primary" type="button" disabled={pending || !volumeName.trim()} onClick={() => void createVolume()}>{pending ? "Creating…" : "Create"}</button>
-          </div>
+          <form onSubmit={submitVolume}>
+            <label className="label">
+              Name
+              <input className="field" data-focus="first" value={volumeName} aria-invalid={Boolean(nameError)} onBlur={() => setNameError(volumeName.trim() ? "" : "Name is required.")} onChange={(event) => setVolumeName(event.target.value)} />
+              {nameError ? <span className="field-error">{nameError}</span> : null}
+            </label>
+            <label className="label">Driver<input className="field" value={driver} onChange={(event) => setDriver(event.target.value)} /></label>
+            <div className="dialog-actions">
+              <button className="btn" type="button" onClick={() => setCreate(false)}>Cancel</button>
+              <button className="btn primary" type="submit" disabled={pending}>{pending ? "Creating…" : "Create"}</button>
+            </div>
+          </form>
         </Dialog>
       ) : null}
       {remove ? (
         <Dialog title={remove.length === 1 ? `Remove volume ${remove[0].name}?` : `Remove ${remove.length} volumes?`} onClose={() => setRemove(null)}>
-          <p>{remove.length === 1 ? `Remove volume ${remove[0].name}? Containers using it must be stopped first.` : `Remove ${remove.length} volumes? Containers using them must be stopped first.`}</p>
+          <p>
+            {remove.length === 1
+              ? `Remove volume ${remove[0].name}? Data inside this volume is permanently deleted. Containers using it must be stopped first.`
+              : `Remove ${listedNames(remove.map((item) => item.name))}? Data inside these volumes is permanently deleted. Containers using them must be stopped first.`}
+          </p>
           <div className="dialog-actions">
             <button className="btn" data-focus="first" type="button" onClick={() => setRemove(null)}>Cancel</button>
             <button className="btn danger" type="button" disabled={pending} onClick={() => void removeVolumes()}>{pending ? "Removing…" : "Remove"}</button>

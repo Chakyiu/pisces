@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, api } from "../../../../../lib/api";
 import type { Network } from "../../../../../lib/types";
+import { listedNames } from "../../../../../lib/ux";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
@@ -30,6 +31,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const [offset, setOffset] = useState(0);
   const [create, setCreate] = useState(false);
   const [networkName, setNetworkName] = useState("");
+  const [nameError, setNameError] = useState("");
   const [driver, setDriver] = useState("bridge");
   const [picked, setPicked] = useState<Record<string, Network>>({});
   const [remove, setRemove] = useState<Network[] | null>(null);
@@ -42,9 +44,18 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const query = usePaged<Network>(`/api/endpoints/${id}/networks?q=${encodeURIComponent(applied)}&limit=50${offset ? `&cursor=${offset}` : ""}`);
   refreshRef.current = () => { void query.reload(); };
   const items = query.data?.items ?? [];
-  const selected = items.filter((item) => picked[item.name]);
-  const blocked = selected.filter((item) => !item.removable);
-  const allChecked = items.length > 0 && selected.length === items.length;
+  const removable = items.filter((item) => item.removable);
+  const selected = removable.filter((item) => picked[item.name]);
+  const allChecked = removable.length > 0 && selected.length === removable.length;
+
+  function submitNetwork(event: FormEvent) {
+    event.preventDefault();
+    if (!networkName.trim()) {
+      setNameError("Name is required.");
+      return;
+    }
+    void createNetwork();
+  }
 
   async function createNetwork() {
     setPending(true);
@@ -80,8 +91,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
     }
   }
 
-  const removeTitle = blocked.length > 0 ? `${blocked.map((item) => item.name).join(", ")} cannot be removed.` : undefined;
-
   return (
     <>
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
@@ -89,13 +98,14 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
         <div className="widget-head">
           <input className="field search" placeholder="name" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
-          <button className="btn primary" type="button" onClick={() => { setNetworkName(""); setDriver("bridge"); setCreate(true); }}>
+          <button className="btn primary" type="button" onClick={() => { setNetworkName(""); setNameError(""); setDriver("bridge"); setCreate(true); }}>
             <Icon name="plus" /> Create network
           </button>
-          <button className="btn danger" type="button" disabled={pending || selected.length === 0 || blocked.length > 0} title={removeTitle} onClick={() => setRemove(selected)}>
+          <button className="btn danger" type="button" disabled={pending || selected.length === 0} onClick={() => setRemove(selected)}>
             <Icon name="trash" /> Remove
           </button>
         </div>
+        <p className="help" style={{ padding: "0 16px 8px" }}>Built-in networks such as bridge, host, and none cannot be removed, so Select all leaves them out.</p>
         {query.status === "loading" && !query.data ? <Loading noun="networks" /> : null}
         {query.status === "error" ? <ErrorState title={`Docker endpoint ${name} is not responding.`} message={query.message} attempts={query.attempts} at={query.at} onRetry={query.retry} /> : null}
         {query.status === "ready" && query.data?.items.length === 0 ? (
@@ -108,7 +118,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <table>
               <thead>
                 <tr>
-                  <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all" checked={allChecked} onChange={() => setPicked(allChecked ? {} : Object.fromEntries(items.map((item) => [item.name, item])))} /></label></th>
+                  <th className="col-check"><label className="check"><input type="checkbox" aria-label="Select all removable networks" checked={allChecked} disabled={removable.length === 0} onChange={() => setPicked(allChecked ? {} : Object.fromEntries(removable.map((item) => [item.name, item])))} /></label></th>
                   <th>Name</th><th>Driver</th><th>Scope</th><th>Subnet</th><th>Containers</th>
                 </tr>
               </thead>
@@ -120,7 +130,8 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <input
                           type="checkbox"
                           aria-label={`Select ${item.name}`}
-                          checked={Boolean(picked[item.name])}
+                          checked={Boolean(picked[item.name]) && item.removable}
+                          disabled={!item.removable}
                           title={item.removable ? undefined : `${item.name} cannot be removed.`}
                           onChange={() => setPicked((prev) => { const next = { ...prev }; if (next[item.name]) delete next[item.name]; else next[item.name] = item; return next; })}
                         />
@@ -141,17 +152,23 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       </section>
       {create ? (
         <Dialog title="Create network" onClose={() => setCreate(false)}>
-          <label className="label">Name<input className="field" value={networkName} onChange={(event) => setNetworkName(event.target.value)} /></label>
-          <label className="label">Driver<input className="field" value={driver} onChange={(event) => setDriver(event.target.value)} /></label>
-          <div className="dialog-actions">
-            <button className="btn" type="button" onClick={() => setCreate(false)}>Cancel</button>
-            <button className="btn primary" type="button" disabled={pending || !networkName.trim()} onClick={() => void createNetwork()}>{pending ? "Creating…" : "Create"}</button>
-          </div>
+          <form onSubmit={submitNetwork}>
+            <label className="label">
+              Name
+              <input className="field" data-focus="first" value={networkName} aria-invalid={Boolean(nameError)} onBlur={() => setNameError(networkName.trim() ? "" : "Name is required.")} onChange={(event) => setNetworkName(event.target.value)} />
+              {nameError ? <span className="field-error">{nameError}</span> : null}
+            </label>
+            <label className="label">Driver<input className="field" value={driver} onChange={(event) => setDriver(event.target.value)} /></label>
+            <div className="dialog-actions">
+              <button className="btn" type="button" onClick={() => setCreate(false)}>Cancel</button>
+              <button className="btn primary" type="submit" disabled={pending}>{pending ? "Creating…" : "Create"}</button>
+            </div>
+          </form>
         </Dialog>
       ) : null}
       {remove ? (
         <Dialog title={remove.length === 1 ? `Remove network ${remove[0].name}?` : `Remove ${remove.length} networks?`} onClose={() => setRemove(null)}>
-          <p>{remove.length === 1 ? `Remove network ${remove[0].name}? Containers attached to it must be disconnected first.` : `Remove ${remove.length} networks? Containers attached to them must be disconnected first.`}</p>
+          <p>{remove.length === 1 ? `Remove network ${remove[0].name}? Containers attached to it must be disconnected first.` : `Remove ${listedNames(remove.map((item) => item.name))}? Containers attached to them must be disconnected first.`}</p>
           <div className="dialog-actions">
             <button className="btn" data-focus="first" type="button" onClick={() => setRemove(null)}>Cancel</button>
             <button className="btn danger" type="button" disabled={pending} onClick={() => void removeNetworks()}>{pending ? "Removing…" : "Remove"}</button>

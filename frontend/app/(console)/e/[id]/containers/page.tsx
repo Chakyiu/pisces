@@ -1,11 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../lib/api";
-import { age, portList } from "../../../../../lib/format";
-import type { Container } from "../../../../../lib/types";
+import { age, imageLabel, portList } from "../../../../../lib/format";
+import type { Container, ImageItem, Page } from "../../../../../lib/types";
+import { listedNames, parsePort } from "../../../../../lib/ux";
 import { Badge, Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
 import { AiAccessBadge } from "../../../../../components/container-ai-access";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
@@ -47,10 +48,12 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const [pending, setPending] = useState("");
   const [alert, setAlert] = useState("");
   const [remove, setRemove] = useState<Container[] | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
   useEffect(() => {
     const timer = setTimeout(() => { setAppliedQ(q); setOffset(0); }, 200);
     return () => clearTimeout(timer);
   }, [q]);
+  useEffect(() => { setPicked({}); }, [appliedQ, state, offset]);
   const cursor = offset ? `&cursor=${offset}` : "";
   const query = usePaged<Container>(
     `/api/endpoints/${id}/containers?q=${encodeURIComponent(appliedQ)}&state=${encodeURIComponent(state)}${cursor}&limit=50`,
@@ -96,6 +99,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       if (err instanceof ApiError) publishApiError(err.code);
       const label = action[0].toUpperCase() + action.slice(1);
       setAlert(`${label} failed. ${message}`);
+      await query.reload();
     } finally {
       setPending("");
     }
@@ -116,6 +120,10 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             {STATES.map((item) => <option key={item} value={item}>{item === "all" ? "All" : item}</option>)}
           </select>
           <div className="grow" />
+          {selected.length > 0 ? <span className="note">{selected.length} selected</span> : null}
+          <button className="btn primary" type="button" onClick={() => setAddOpen(true)}>
+            <Icon name="plus" /> Add container
+          </button>
           <div className="bulk">
             <button className="btn" type="button" disabled={Boolean(pending) || startTargets.length === 0} onClick={() => void act(startTargets, "start")}>
               <Icon name="play" /> {label("start", "Starting…", "Start")}
@@ -142,7 +150,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <Empty
               title={`No containers on ${name}.`}
               body="The engine is up. Nothing is running or stopped. Start one from an image already on the machine."
-              action={{ label: "Go to images", primary: true, onClick: () => router.push(`/e/${id}/images`) }}
+              action={{ label: "Add container", primary: true, onClick: () => setAddOpen(true) }}
             />
           )
         ) : null}
@@ -175,8 +183,11 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                     <td><Badge state={item.state} /></td>
                     <td><AiAccessBadge access={item.aiAccess} /></td>
                     <td>
-                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}#container-logs`} aria-label="Logs" title="Logs">
+                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}#container-logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}>
                         <Icon name="logs" />
+                      </Link>
+                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=console`} aria-label={`Console ${item.name}`} title={`Console ${item.name}`}>
+                        <Icon name="console" />
                       </Link>
                     </td>
                     <td className="mono name-cell" title={item.image}>{item.image}</td>
@@ -202,7 +213,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
           <p>
             {remove.length === 1
               ? `${remove[0].state === "running" ? `${remove[0].name} is running. Removing it stops it and deletes the writable layer.` : `${remove[0].name} is ${remove[0].state}. Removing it deletes the writable layer.`} Named volumes stay on ${name}.`
-              : `Removing ${remove.length} containers deletes their writable layers. Named volumes stay on ${name}.`}
+              : `Removing ${listedNames(remove.map((item) => item.name))} deletes their writable layers. Named volumes stay on ${name}.`}
           </p>
           <div className="dialog-actions">
             <button className="btn" data-focus="first" type="button" onClick={() => setRemove(null)}>Cancel</button>
@@ -212,6 +223,111 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
           </div>
         </Dialog>
       ) : null}
+      {addOpen ? (
+        <AddContainerDialog
+          id={id}
+          onClose={() => setAddOpen(false)}
+          onCreated={(containerId) => router.push(`/e/${id}/containers/${encodeURIComponent(containerId)}`)}
+        />
+      ) : null}
     </>
+  );
+}
+
+function AddContainerDialog({
+  id,
+  onClose,
+  onCreated,
+}: {
+  id: string;
+  onClose: () => void;
+  onCreated: (containerId: string) => void;
+}) {
+  const [images, setImages] = useState<ImageItem[]>([]);
+  const [image, setImage] = useState("");
+  const [containerName, setContainerName] = useState("");
+  const [port, setPort] = useState("");
+  const [portError, setPortError] = useState("");
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    let live = true;
+    void api<Page<ImageItem>>(`/api/endpoints/${id}/images?limit=50`)
+      .then((body) => { if (live) setImages(body.items); })
+      .catch(() => { if (live) setImages([]); });
+    return () => { live = false; };
+  }, [id]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const parsed = parsePort(port);
+    if (!image.trim()) {
+      setError("Choose or type an image.");
+      return;
+    }
+    if (parsed === null) {
+      setPortError("Use host:container, a single port, or leave this empty.");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      const created = await api<{ id: string }>(`/api/endpoints/${id}/containers`, {
+        method: "POST",
+        body: {
+          image: image.trim(),
+          name: containerName.trim() || undefined,
+          ports: parsed === "empty" ? [] : [parsed],
+        },
+      });
+      onCreated(created.id);
+    } catch (err) {
+      if (err instanceof ApiError) publishApiError(err.code);
+      setError(err instanceof ApiError ? err.message : "The engine did not answer.");
+      setPending(false);
+    }
+  }
+
+  return (
+    <Dialog title="Add container" onClose={onClose}>
+      <form onSubmit={(event) => void submit(event)}>
+        <label className="label">
+          Local images
+          <select
+            className="select"
+            aria-label="Local images"
+            value=""
+            onChange={(event) => {
+              const picked = images.find((item) => item.id === event.target.value);
+              if (picked) setImage(imageLabel(picked.tags) === "<none>:<none>" ? picked.id : imageLabel(picked.tags));
+            }}
+          >
+            <option value="">Choose an image on this engine</option>
+            {images.map((item) => (
+              <option key={item.id} value={item.id}>{imageLabel(item.tags)}</option>
+            ))}
+          </select>
+        </label>
+        <label className="label">
+          Image
+          <input className="field" data-focus="first" value={image} onChange={(event) => setImage(event.target.value)} />
+        </label>
+        <label className="label">
+          Name
+          <input className="field" value={containerName} onChange={(event) => setContainerName(event.target.value)} />
+        </label>
+        <label className="label">
+          Port
+          <input className="field" placeholder="8080:80" value={port} onBlur={() => setPortError(parsePort(port) === null ? "Use host:container, a single port, or leave this empty." : "")} onChange={(event) => setPort(event.target.value)} />
+          {portError ? <span className="field-error">{portError}</span> : null}
+        </label>
+        {error ? <p className="field-error">{error}</p> : null}
+        <div className="dialog-actions">
+          <button className="btn" type="button" onClick={onClose}>Cancel</button>
+          <button className="btn primary" type="submit" disabled={pending}>{pending ? "Running…" : "Run"}</button>
+        </div>
+      </form>
+    </Dialog>
   );
 }

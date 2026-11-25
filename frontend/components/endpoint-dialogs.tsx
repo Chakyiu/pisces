@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { ApiError, api } from "../lib/api";
 import { Dialog } from "./bits";
 
@@ -8,35 +8,35 @@ export function DockerDialog({ onClose, onAdd }: { onClose: () => void; onAdd: (
   const [name, setName] = useState("local");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    setPending(true);
+    setError("");
+    onAdd(name.trim() || "local").catch((err: unknown) => {
+      setError(err instanceof ApiError ? err.message : "The endpoint could not be added.");
+      setPending(false);
+    });
+  }
+
   return (
     <Dialog title="Add Docker endpoint" onClose={onClose}>
-      <label className="label">
-        Name
-        <input className="field" value={name} onChange={(event) => setName(event.target.value)} />
-      </label>
-      <label className="label">
-        Engine
-        <input className="field" readOnly value="This machine" />
-      </label>
-      {error ? <p className="field-error">{error}</p> : null}
-      <div className="dialog-actions">
-        <button className="btn" type="button" onClick={onClose}>Cancel</button>
-        <button
-          className="btn primary"
-          type="button"
-          disabled={pending}
-          onClick={() => {
-            setPending(true);
-            setError("");
-            onAdd(name.trim() || "local").catch((err: unknown) => {
-              setError(err instanceof ApiError ? err.message : "The endpoint could not be added.");
-              setPending(false);
-            });
-          }}
-        >
-          {pending ? "Adding…" : "Add"}
-        </button>
-      </div>
+      <form onSubmit={submit}>
+        <label className="label">
+          Name
+          <input className="field" data-focus="first" value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <label className="label">
+          Engine
+          <input className="field" readOnly value="This machine" />
+        </label>
+        {error ? <p className="field-error">{error}</p> : null}
+        <div className="dialog-actions">
+          <button className="btn" type="button" onClick={onClose}>Cancel</button>
+          <button className="btn primary" type="submit" disabled={pending}>
+            {pending ? "Adding…" : "Add"}
+          </button>
+        </div>
+      </form>
     </Dialog>
   );
 }
@@ -71,11 +71,21 @@ export function KubernetesDialog({
   useEffect(() => { load(); }, []);
 
   const empty = contexts !== null && contexts.length === 0 && !error;
+  function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!context || error || contexts === null) return;
+    setPending(true);
+    onAdd(name.trim() || "desk", context).catch((err: unknown) => {
+      setError(err instanceof ApiError ? err.message : "The endpoint could not be added.");
+      setPending(false);
+    });
+  }
   return (
     <Dialog title="Add Kubernetes context" onClose={onClose}>
+      <form onSubmit={submit}>
       <label className="label">
         Name
-        <input className="field" value={name} onChange={(event) => setName(event.target.value)} />
+        <input className="field" data-focus="first" value={name} onChange={(event) => setName(event.target.value)} />
       </label>
       <label className="label">
         Context
@@ -95,19 +105,13 @@ export function KubernetesDialog({
         <button className="btn" type="button" onClick={onClose}>Cancel</button>
         <button
           className="btn primary"
-          type="button"
+          type="submit"
           disabled={pending || !context || Boolean(error) || contexts === null}
-          onClick={() => {
-            setPending(true);
-            onAdd(name.trim() || "desk", context).catch((err: unknown) => {
-              setError(err instanceof ApiError ? err.message : "The endpoint could not be added.");
-              setPending(false);
-            });
-          }}
         >
           {pending ? "Adding…" : "Add"}
         </button>
       </div>
+      </form>
     </Dialog>
   );
 }

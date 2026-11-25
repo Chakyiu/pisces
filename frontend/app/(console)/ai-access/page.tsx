@@ -84,6 +84,8 @@ function CredentialScreen() {
   const [busy, setBusy] = useState("");
   const [alert, setAlert] = useState("");
   const [counts, setCounts] = useState<Counts | null>(null);
+  const [openRows, setOpenRows] = useState<OpenRow[]>([]);
+  const [locking, setLocking] = useState("");
   const [pending, setPending] = useState(0);
 
   async function load(retry: boolean) {
@@ -106,6 +108,7 @@ function CredentialScreen() {
     let live = true;
     async function collect() {
       const totals: Counts = { read: 0, operate: 0, locked: 0 };
+      const rows: OpenRow[] = [];
       let seen = false;
       for (const endpoint of endpoints as Endpoint[]) {
         if (endpoint.kind !== "docker") continue;
@@ -116,12 +119,18 @@ function CredentialScreen() {
             if (item.state === "operate") totals.operate += 1;
             else if (item.state === "read") totals.read += 1;
             else totals.locked += 1;
+            if (item.state === "read" || item.state === "operate") {
+              rows.push({ ...item, endpointId: endpoint.id, endpointName: endpoint.name });
+            }
           }
         } catch {
           // A down endpoint just drops out of the count.
         }
       }
-      if (live) setCounts(seen ? totals : null);
+      if (live) {
+        setCounts(seen ? totals : null);
+        setOpenRows(rows);
+      }
     }
     async function proposals() {
       try {
@@ -165,6 +174,29 @@ function CredentialScreen() {
       setAlert(err instanceof ApiError ? err.message : "The API did not answer within 10 seconds. Nothing changed.");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function lock(row: OpenRow) {
+    if (row.forcedLocked) return;
+    setLocking(`${row.endpointId}:${row.containerId}`);
+    setAlert("");
+    try {
+      await api(`/api/ai-access/${row.endpointId}/${encodeURIComponent(row.containerId)}`, {
+        method: "PUT",
+        body: { state: "locked" },
+      });
+      setOpenRows((current) => current.filter((item) => item.endpointId !== row.endpointId || item.containerId !== row.containerId));
+      setCounts((current) => current ? {
+        ...current,
+        read: current.read - (row.state === "read" ? 1 : 0),
+        operate: current.operate - (row.state === "operate" ? 1 : 0),
+        locked: current.locked + 1,
+      } : current);
+    } catch (err) {
+      setAlert(err instanceof ApiError ? err.message : "Lock failed. This container's access did not change.");
+    } finally {
+      setLocking("");
     }
   }
 
@@ -278,6 +310,53 @@ function CredentialScreen() {
           </p>
         </section>
       ) : null}
+      {status === "ready" ? (
+        <section className="widget">
+          <div className="widget-head">
+            <div className="widget-title">Authorized containers</div>
+          </div>
+          {openRows.length === 0 ? (
+            <p className="ai-help" style={{ padding: "0 16px 16px" }}>
+              No containers are open for Read or Operate. The default is Locked.
+            </p>
+          ) : (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Container</th>
+                    <th>Environment</th>
+                    <th>Access</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openRows.map((row) => (
+                    <tr key={`${row.endpointId}:${row.containerId}`}>
+                      <td className="name-cell" title={row.containerName}>
+                        <Link className="name-link" href={`/e/${row.endpointId}/containers/${encodeURIComponent(row.containerId)}`}>{row.containerName}</Link>
+                      </td>
+                      <td>{row.endpointName}</td>
+                      <td>{row.state === "operate" ? "Operate" : "Read"}</td>
+                      <td>
+                        <button
+                          className="btn"
+                          type="button"
+                          disabled={row.forcedLocked || locking === `${row.endpointId}:${row.containerId}`}
+                          title={row.forcedLocked ? row.reason : `Lock ${row.containerName}`}
+                          onClick={() => void lock(row)}
+                        >
+                          {locking === `${row.endpointId}:${row.containerId}` ? "Locking…" : "Lock"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      ) : null}
       {status === "ready" && credential?.state === "active" ? (
         <p className="ai-help">
           <Link className="ai-link" href="/ai-access/proposals">
@@ -362,6 +441,8 @@ function CredentialScreen() {
     </div>
   );
 }
+
+type OpenRow = AiAccessItem & { endpointId: string; endpointName: string };
 
 function Fact({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
   return (

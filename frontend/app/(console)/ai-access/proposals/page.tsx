@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiError, api } from "../../../../lib/api";
 import { atTime, clock, left } from "../../../../lib/format";
 import { unifiedDiff, type DiffLine } from "../../../../lib/diff";
@@ -19,17 +19,19 @@ const FILTERS = [
 ] as const;
 
 export default function ProposalsPage() {
+  const refreshRef = useRef<() => void>(() => {});
   return (
     <PageFrame
       title="AI access"
       crumbs={[{ label: "AI access", href: "/ai-access" }, { label: "Proposals" }]}
+      onRefresh={() => refreshRef.current()}
     >
-      <ProposalScreen />
+      <ProposalScreen refreshRef={refreshRef} />
     </PageFrame>
   );
 }
 
-function ProposalScreen() {
+function ProposalScreen({ refreshRef }: { refreshRef: { current: () => void } }) {
   const { endpoints, username } = useConsole();
   const [items, setItems] = useState<Proposal[] | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -55,6 +57,7 @@ function ProposalScreen() {
   }
 
   useEffect(() => { void load(false); }, []);
+  refreshRef.current = () => { void load(false); };
 
   const all = items ?? [];
   const pending = all.filter((item) => item.status === "pending").length;
@@ -155,6 +158,7 @@ function ProposalScreen() {
       </section>
       {review ? (
         <ReviewDialog
+          key={review.id}
           proposal={review}
           onClose={() => setReview(null)}
           onDecided={async (error) => {
@@ -235,7 +239,11 @@ function ReviewDialog({
     proposal.action === "duplicate" ? [{ label: "Source container", value: source }, ...fields] : fields;
 
   useEffect(() => {
-    if (!stack || !payload.compose) return;
+    if (!stack) return;
+    if (!payload.compose) {
+      setDiff([]);
+      return;
+    }
     let live = true;
     async function loadDiff() {
       let before = "";
@@ -274,6 +282,7 @@ function ReviewDialog({
   }
 
   const verb = proposal.action.replace(/^stack-/, "");
+  const diffLoading = stack && diff === null && !diffError;
 
   return (
     <Dialog
@@ -363,7 +372,7 @@ function ReviewDialog({
               <button className="btn danger" type="button" disabled={Boolean(busy)} onClick={() => void decide("reject")}>
                 {busy === "reject" ? "Rejecting…" : "Reject"}
               </button>
-              <button className="btn primary" type="button" disabled={Boolean(busy)} onClick={() => void decide("confirm")}>
+              <button className="btn primary" type="button" disabled={Boolean(busy) || diffLoading} title={diffLoading ? "Waiting for the compose diff" : undefined} onClick={() => void decide("confirm")}>
                 {busy === "confirm" ? "Confirming…" : `Confirm ${actionLabel(proposal.action).toLowerCase()}`}
               </button>
             </>

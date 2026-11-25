@@ -2,6 +2,19 @@
 
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { ApiError, api, setUnauthorizedHandler } from "../lib/api";
+import { safeNextPath } from "../lib/ux";
+
+function loginHref(ended: boolean): string {
+  if (typeof window === "undefined" || window.location.pathname.startsWith("/login")) {
+    return ended ? "/login?ended=1" : "/login";
+  }
+  const next = safeNextPath(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+  const params = new URLSearchParams();
+  if (ended) params.set("ended", "1");
+  if (next) params.set("next", next);
+  const query = params.toString();
+  return query ? `/login?${query}` : "/login";
+}
 
 export type Session =
   | { status: "checking" }
@@ -28,7 +41,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
       setSession({
         status: "error",
-        message: err instanceof ApiError ? err.message : "The API did not answer within 10 seconds.",
+        message: err instanceof ApiError ? err.message : "The Pisces API did not answer within 10 seconds.",
       });
     }
   }
@@ -37,7 +50,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setUnauthorizedHandler(() => {
       setSession({ status: "out", ended: true });
       if (!window.location.pathname.startsWith("/login")) {
-        window.location.assign("/login?ended=1");
+        window.location.assign(loginHref(true));
       }
     });
     void refresh();

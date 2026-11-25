@@ -4,7 +4,8 @@ import { createContext, useContext, useEffect, useRef, useState, type KeyboardEv
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { api } from "../lib/api";
-import type { Endpoint, Overview } from "../lib/types";
+import type { Endpoint, Overview, Page } from "../lib/types";
+import { dockerSectionHref, safeNextPath, withEndpointCrumbs } from "../lib/ux";
 import { useSession } from "./session";
 import { Gate, Icon, IconButton } from "./bits";
 
@@ -29,11 +30,11 @@ export function useConsole(): ConsoleValue {
   return value;
 }
 
-type NavCountKey = "containers" | "images" | "networks" | "volumes" | null;
+type NavCountKey = "containers" | "images" | "networks" | "volumes" | "stacks" | null;
 
 const DOCKER_NAV: { icon: string; label: string; suffix: string; countKey: NavCountKey }[] = [
   { icon: "overview", label: "Dashboard", suffix: "", countKey: null },
-  { icon: "stacks", label: "Stacks", suffix: "/stacks", countKey: null },
+  { icon: "stacks", label: "Stacks", suffix: "/stacks", countKey: "stacks" },
   { icon: "containers", label: "Containers", suffix: "/containers", countKey: "containers" },
   { icon: "images", label: "Images", suffix: "/images", countKey: "images" },
   { icon: "networks", label: "Networks", suffix: "/networks", countKey: "networks" },
@@ -55,6 +56,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const [overlay, setOverlay] = useState(false);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [navCounts, setNavCounts] = useState<Overview["counts"] | null>(null);
+  const [stackTotal, setStackTotal] = useState<number | null>(null);
+  const [pendingProposals, setPendingProposals] = useState(0);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -83,9 +86,13 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [session.status]);
 
   useEffect(() => {
-    if (session.status === "out") {
-      router.replace(session.ended ? "/login?ended=1" : "/login");
-    }
+    if (session.status !== "out" || window.location.pathname.startsWith("/login")) return;
+    const next = safeNextPath(`${window.location.pathname}${window.location.search}${window.location.hash}`);
+    const params = new URLSearchParams();
+    if (session.ended) params.set("ended", "1");
+    if (next) params.set("next", next);
+    const query = params.toString();
+    router.replace(query ? `/login?${query}` : "/login");
   }, [session, router]);
 
   useEffect(() => {
@@ -127,9 +134,42 @@ export function Shell({ children }: { children: ReactNode }) {
     };
   }, [current?.id, current?.kind]);
 
+  useEffect(() => {
+    if (!current || current.kind !== "docker") {
+      setStackTotal(null);
+      return;
+    }
+    let cancelled = false;
+    void api<Page<unknown>>(`/api/endpoints/${current.id}/stacks?limit=1`)
+      .then((body) => {
+        if (!cancelled) setStackTotal(body.total);
+      })
+      .catch(() => {
+        if (!cancelled) setStackTotal(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [current?.id, current?.kind, pathname]);
+
+  useEffect(() => {
+    if (session.status !== "in") return;
+    let cancelled = false;
+    void api<{ items: { status: string }[] }>("/api/proposals")
+      .then((body) => {
+        if (!cancelled) setPendingProposals(body.items.filter((item) => item.status === "pending").length);
+      })
+      .catch(() => {
+        if (!cancelled) setPendingProposals(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [session.status, pathname]);
+
   if (session.status === "checking") return <Gate title="Checking session" />;
   if (session.status === "error") {
-    return <Gate title="The API did not answer within 10 seconds." onRetry={() => void session.refresh()} />;
+    return <Gate title="The Pisces API did not answer within 10 seconds." onRetry={() => void session.refresh()} />;
   }
   if (session.status !== "in") return <Gate title="Checking session" />;
 
@@ -184,6 +224,7 @@ export function Shell({ children }: { children: ReactNode }) {
   }
 
   function navCount(key: NavCountKey) {
+    if (key === "stacks") return stackTotal ?? undefined;
     if (!key || !navCounts) return undefined;
     if (key === "containers") return navCounts.containersRunning + navCounts.containersStopped;
     return navCounts[key];
@@ -208,9 +249,16 @@ export function Shell({ children }: { children: ReactNode }) {
     <ConsoleCtx.Provider value={value}>
       <div className={`shell${open ? " sidebar-open" : ""}${overlay ? " overlay" : ""}`}>
         <aside className={`sidebar${open ? "" : " collapsed"}`}>
-          <div className="brand">{open ? "Pisces" : "P"}</div>
+          <Link href="/home" className="brand">{open ? "Pisces" : "P"}</Link>
           <nav className="nav" aria-label="Primary">
-            <EnvSwitcher current={current} collapsed={collapsed} />
+            <NavLink href="/home" icon="home" label="Home" active={pathname === "/home"} collapsed={collapsed} />
+            <EnvSwitcher
+              current={current}
+              collapsed={collapsed}
+              endpoints={endpoints}
+              down={down}
+              pathname={pathname}
+            />
             {current?.kind === "docker" ? (
               <>
                 {open ? <div className="nav-group-label">Docker</div> : null}
@@ -237,14 +285,25 @@ export function Shell({ children }: { children: ReactNode }) {
                 <K8sNav id={current.id} pathname={pathname} collapsed={collapsed} />
               </>
             ) : null}
+            {open ? <div className="nav-group-label">AI & Security</div> : null}
+            <NavLink href="/ai-access" icon="user" label="AI access" active={pathname === "/ai-access"} collapsed={collapsed} />
+            <NavLink
+              href="/ai-access/proposals"
+              icon="eye"
+              label="Proposals"
+              active={pathname.startsWith("/ai-access/proposals")}
+              collapsed={collapsed}
+              count={pendingProposals > 0 ? pendingProposals : undefined}
+            />
           </nav>
-          <div className="sidebar-footer">
-            <div className="footer-settings" aria-hidden={collapsed}>
-              <Icon name="settings" />
-              <span>Settings</span>
-              <span className="nav-soon">soon</span>
-            </div>
-            <div className="popover">
+        </aside>
+        <div className="main">
+          <header className="page-header">
+            <IconButton name="sidebar" label="Toggle sidebar" onClick={toggleSidebar} />
+            <span className="header-rule" aria-hidden="true" />
+            <HeaderCrumbs crumbs={crumbs} />
+            <div className="header-spacer" />
+            <div className="popover header-popover">
               <button
                 ref={menuButtonRef}
                 className="btn user-btn"
@@ -263,24 +322,28 @@ export function Shell({ children }: { children: ReactNode }) {
                 }}
               >
                 <Icon name="user" />
-                <span>{session.username}</span>
+                <span className="header-user-name">{session.username}</span>
                 <Icon name="chevron" />
               </button>
               {menu ? (
                 <div id={USER_MENU_ID} ref={menuRef} className="menu" role="menu" onKeyDown={onMenuKeyDown}>
                   <div className="menu-user" aria-hidden="true">{session.username}</div>
-                  <Link role="menuitem" tabIndex={-1} href="/ai-access" onClick={() => setMenu(false)}><Icon name="user" />AI access</Link>
+                  <div className="menu-note">Signed in · 8h cookie session</div>
                   <button type="button" role="menuitem" tabIndex={-1} onClick={() => void signOut()}><Icon name="sign-out" />Sign out</button>
                 </div>
               ) : null}
             </div>
-          </div>
-        </aside>
-        <div className="main">
-          <header className="page-header">
-            <IconButton name="sidebar" label="Toggle sidebar" onClick={toggleSidebar} />
-            <span className="header-rule" aria-hidden="true" />
-            <nav className="crumbs" aria-label="Breadcrumb">
+          </header>
+          <div className="content">{children}</div>
+        </div>
+      </div>
+    </ConsoleCtx.Provider>
+  );
+}
+
+function HeaderCrumbs({ crumbs }: { crumbs: Crumb[] }) {
+  return (
+    <nav className="crumbs" aria-label="Breadcrumb">
               {crumbs.map((crumb, index) => (
                 <span key={`${crumb.label}-${index}`} className="crumb-item">
                   {index > 0 ? <span className="crumb-sep">/</span> : null}
@@ -292,12 +355,6 @@ export function Shell({ children }: { children: ReactNode }) {
                 </span>
               ))}
             </nav>
-            <div className="header-spacer" />
-          </header>
-          <div className="content">{children}</div>
-        </div>
-      </div>
-    </ConsoleCtx.Provider>
   );
 }
 
@@ -316,10 +373,12 @@ export function PageFrame({
   onRefresh?: () => void;
   children: ReactNode;
 }) {
-  const { setCrumbs } = useConsole();
-  const serialized = JSON.stringify(crumbs);
-  const latest = useRef(crumbs);
-  latest.current = crumbs;
+  const { setCrumbs, current } = useConsole();
+  const pathname = usePathname();
+  const scoped = withEndpointCrumbs(current, crumbs, pathname);
+  const serialized = JSON.stringify(scoped);
+  const latest = useRef(scoped);
+  latest.current = scoped;
   useEffect(() => {
     setCrumbs(latest.current);
   }, [serialized, setCrumbs]);
@@ -366,8 +425,8 @@ function NavLink({
       href={href}
       className={`${active ? "active" : ""}${nested ? " nested" : ""}${muted ? " muted-nav" : ""}`}
       aria-current={active ? "page" : undefined}
-      aria-label={label}
-      title={label}
+      aria-label={count != null ? `${label}, ${count}` : label}
+      title={count != null ? `${label} (${count})` : label}
     >
       <Icon name={icon} />
       {collapsed ? null : (
@@ -381,19 +440,119 @@ function NavLink({
   );
 }
 
-function EnvSwitcher({ current, collapsed }: { current?: Endpoint; collapsed: boolean }) {
+function EnvSwitcher({
+  current,
+  collapsed,
+  endpoints,
+  down,
+  pathname,
+}: {
+  current?: Endpoint;
+  collapsed: boolean;
+  endpoints: Endpoint[];
+  down: Record<string, boolean>;
+  pathname: string;
+}) {
+  const router = useRouter();
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [openMenu, setOpenMenu] = useState(false);
+  const [box, setBox] = useState<{ top: number; left: number; width: number } | null>(null);
   const label = current ? current.name : "Choose environment";
   const icon = current ? (current.kind === "kubernetes" ? "kubernetes" : "docker") : "home";
+
+  function place() {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const width = Math.max(240, rect.width);
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    setBox({ top: rect.bottom + 4, left, width });
+  }
+
+  useEffect(() => { setOpenMenu(false); }, [pathname]);
+
+  useEffect(() => {
+    if (!openMenu) return;
+    place();
+    function onDoc(event: MouseEvent) {
+      const target = event.target as Node;
+      if (buttonRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpenMenu(false);
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpenMenu(false);
+    }
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [openMenu]);
+
   return (
-    <Link href="/home" className="env-switcher" aria-label={`Environment: ${label}`} title={label}>
-      <Icon name={icon} />
-      {collapsed ? null : (
-        <>
-          <span className="env-switcher-label">{label}</span>
-          <Icon name="chevron" />
-        </>
-      )}
-    </Link>
+    <div className="env-switcher-wrap">
+      <button
+        ref={buttonRef}
+        type="button"
+        className="env-switcher"
+        aria-label={`Environment: ${label}`}
+        aria-haspopup="menu"
+        aria-expanded={openMenu}
+        title={label}
+        onClick={() => {
+          if (openMenu) setOpenMenu(false);
+          else {
+            place();
+            setOpenMenu(true);
+          }
+        }}
+      >
+        <Icon name={icon} />
+        {collapsed ? null : (
+          <>
+            <span className="env-switcher-label">{label}</span>
+            <Icon name="chevron" />
+          </>
+        )}
+      </button>
+      {openMenu && box ? (
+        <div
+          ref={menuRef}
+          className="menu env-menu"
+          role="menu"
+          style={{ position: "fixed", top: box.top, left: box.left, width: box.width, right: "auto" }}
+        >
+          {endpoints.length === 0 ? <div className="menu-note">No environments yet.</div> : null}
+          {endpoints.map((endpoint) => {
+            const isDown = down[endpoint.id] || endpoint.status === "down";
+            const href = dockerSectionHref(pathname, current?.id, endpoint.id, endpoint.kind, current?.kind);
+            return (
+              <button
+                key={endpoint.id}
+                type="button"
+                role="menuitem"
+                aria-current={endpoint.id === current?.id ? "true" : undefined}
+                onClick={() => {
+                  setOpenMenu(false);
+                  router.push(href);
+                }}
+              >
+                <Icon name={endpoint.kind === "kubernetes" ? "kubernetes" : "docker"} />
+                <i className={`sq ${isDown ? "bad" : "ok"}`} aria-hidden="true" />
+                <span className="env-switcher-label">{endpoint.name}</span>
+                {endpoint.id === current?.id ? <span aria-hidden="true">✓</span> : null}
+              </button>
+            );
+          })}
+          <Link role="menuitem" href="/home" onClick={() => setOpenMenu(false)}>Manage environments</Link>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

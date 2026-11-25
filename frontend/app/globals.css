@@ -93,6 +93,7 @@ textarea.field {
 .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); }
 .btn.danger { border-color: var(--danger); color: var(--danger); background: transparent; }
 .btn.block { width: 100%; }
+.btn.tiny { height: 28px; padding: 0 8px; font-size: 12px; }
 .icon-btn {
   width: 36px;
   height: 36px;
@@ -149,9 +150,12 @@ textarea.field {
   font-weight: 600;
   padding: 8px 0 16px;
   text-align: center;
+  color: inherit;
+  text-decoration: none;
+  display: block;
 }
 .shell.sidebar-open .brand { text-align: left; padding: 8px 12px 16px; }
-.nav { display: grid; gap: 4px; align-content: start; }
+.nav { display: grid; gap: 4px; align-content: start; flex: 1; min-height: 0; overflow: auto; }
 .nav a, .nav-parent {
   position: relative;
   display: flex;
@@ -201,10 +205,12 @@ textarea.field {
   color: var(--text-muted);
 }
 .nav a.muted-nav { color: var(--text-muted); }
+.env-switcher-wrap { min-width: 0; }
 .env-switcher {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   min-height: var(--control-h);
   margin-bottom: var(--space-2);
   padding: 0 var(--space-3);
@@ -213,7 +219,9 @@ textarea.field {
   background: var(--surface-raised);
   color: var(--text);
   font-weight: var(--weight-medium);
+  text-align: left;
 }
+.shell:not(.sidebar-open) .env-switcher-wrap { display: flex; justify-content: center; }
 .shell:not(.sidebar-open) .env-switcher {
   justify-content: center;
   width: var(--control-h);
@@ -335,7 +343,7 @@ textarea.field {
   background: var(--surface);
 }
 .header-rule { width: 1px; height: 24px; background: var(--border); flex: none; }
-.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.crumbs { display: flex; align-items: center; gap: 8px; min-width: 0; overflow: hidden; }
 .crumb-item { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
 .crumb-sep { color: var(--text-muted); }
 .crumb {
@@ -383,6 +391,10 @@ textarea.field {
 .menu a { color: var(--text); text-decoration: none; }
 .menu a:hover, .menu button:hover { background: var(--surface-raised); }
 .menu-user { padding: 8px; }
+.menu-note { padding: 0 8px 8px; color: var(--text-muted); font-size: 12px; }
+.menu.env-menu { z-index: 30; max-height: min(320px, 70vh); overflow: auto; }
+.header-popover .user-btn { border: 1px solid var(--border); border-radius: var(--radius); max-width: 220px; }
+.header-user-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mono { font-family: var(--font-mono); font-weight: 400; }
 .kind {
   font-size: 12px;
@@ -413,7 +425,7 @@ textarea.field {
 .seg.ok { color: var(--success); }
 .seg.bad { color: var(--danger); }
 
-.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 12px; }
 .tile {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -670,6 +682,42 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
+.log-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  padding: 8px 16px;
+}
+.log-bar .setting {
+  display: flex;
+  grid-template-columns: none;
+  min-height: 0;
+  padding: 0;
+  gap: 8px;
+  width: auto;
+}
+.command-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.command-bar .identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.command-bar .identity strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-bar .bulk { margin-left: auto; }
+.tag-more { display: block; color: var(--text-muted); font-size: 12px; }
+.stack-tab.soon { color: var(--text-muted); }
 .switch {
   width: 36px;
   height: 20px;
@@ -774,6 +822,7 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 }
 
 @media (max-width: 560px) {
+  .header-user-name, .header-popover .user-btn .icon:last-child { display: none; }
   .content { padding: 12px; }
   .compose-well { min-height: 240px; }
   .compose-area { min-height: 240px; height: 50vh; max-height: 50vh; font-size: 13px; }

@@ -84,6 +84,7 @@ export default function HomePage() {
         <Empty
           title="No endpoint yet."
           body="Pisces needs a Docker engine or a Kubernetes context before it can show anything. This machine’s Docker engine is the usual first step."
+          action={{ label: "Add Docker endpoint", primary: true, onClick: () => setDialog("docker") }}
         />
       ) : null}
       {ready && endpoints.length > 0 ? (
