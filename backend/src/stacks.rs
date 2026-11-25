@@ -40,6 +40,9 @@ pub fn validate_compose(compose: &str) -> Result<(), ApiError> {
     }) {
         return Err(ApiError::validation("Stack file content is required"));
     }
+    serde_yaml::from_str::<serde_yaml::Value>(compose).map_err(|_| {
+        ApiError::validation("The Compose file is not valid YAML.")
+    })?;
     if compose.len() > MAX_COMPOSE_BYTES {
         return Err(ApiError::validation(
             "This file is larger than 1 MB. Pisces accepts Compose files up to 1 MB.",
@@ -69,6 +72,14 @@ pub fn validate_compose(compose: &str) -> Result<(), ApiError> {
         }
     }
     Ok(())
+}
+
+/// Present stored compose as normalized YAML for the web editor.
+pub fn compose_for_editor(compose: &str) -> String {
+    match serde_yaml::from_str::<serde_yaml::Value>(compose) {
+        Ok(value) => serde_yaml::to_string(&value).unwrap_or_else(|_| compose.to_string()),
+        Err(_) => compose.to_string(),
+    }
 }
 
 pub fn validate_stack_env(entries: &[EnvOut]) -> Result<(), ApiError> {
@@ -123,8 +134,9 @@ pub async fn up(
     directory: &Path,
     compose_file: &Path,
     env_file: Option<&Path>,
+    apply_changes: bool,
 ) -> Result<(), ApiError> {
-    run(project, directory, compose_file, env_file, "up").await
+    run(project, directory, compose_file, env_file, "up", apply_changes).await
 }
 
 pub async fn down(
@@ -133,7 +145,31 @@ pub async fn down(
     compose_file: &Path,
     env_file: Option<&Path>,
 ) -> Result<(), ApiError> {
-    run(project, directory, compose_file, env_file, "down").await
+    run(project, directory, compose_file, env_file, "down", false).await
+}
+
+pub async fn start(
+    project: &str,
+    directory: &Path,
+    compose_file: &Path,
+) -> Result<(), ApiError> {
+    run(project, directory, compose_file, None, "start", false).await
+}
+
+pub async fn stop(
+    project: &str,
+    directory: &Path,
+    compose_file: &Path,
+) -> Result<(), ApiError> {
+    run(project, directory, compose_file, None, "stop", false).await
+}
+
+pub async fn restart(
+    project: &str,
+    directory: &Path,
+    compose_file: &Path,
+) -> Result<(), ApiError> {
+    run(project, directory, compose_file, None, "restart", false).await
 }
 
 async fn run(
@@ -142,6 +178,7 @@ async fn run(
     compose_file: &Path,
     env_file: Option<&Path>,
     action: &str,
+    apply_changes: bool,
 ) -> Result<(), ApiError> {
     let mut command = Command::new("docker");
     command
@@ -155,14 +192,16 @@ async fn run(
     if let Some(path) = env_file.filter(|path| path.is_file()) {
         command.arg("--env-file").arg(path);
     }
-    command
-        .arg(action)
-        .args(if action == "up" {
-            vec!["--detach", "--remove-orphans"]
-        } else {
-            Vec::new()
-        })
-        .kill_on_drop(true);
+    command.arg(action);
+    if action == "up" {
+        command.arg("--detach");
+        command.arg("--remove-orphans");
+        command.arg("--pull").arg("missing");
+        if apply_changes {
+            command.arg("--force-recreate");
+        }
+    }
+    command.kill_on_drop(true);
     let child = command
         .spawn()
         .map_err(|error| ApiError::deploy(format!("Could not start Docker Compose: {error}")))?;
@@ -211,11 +250,20 @@ mod tests {
     #[test]
     fn validates_compose_size_content_and_unsupported_file_paths() {
         assert!(validate_compose("services:\n  web:\n    image: nginx\n").is_ok());
+        assert!(validate_compose("not yaml: [[[").is_err());
         assert!(validate_compose("services:\n  web:\n    build: .\n").is_err());
         assert!(validate_compose("services:\n  web:\n    env_file: .env\n").is_err());
         assert!(validate_compose("services:\n  web:\n    env_file: stack.env\n").is_ok());
         assert!(validate_compose("# comment only\n").is_err());
         assert!(validate_compose(&"x".repeat(MAX_COMPOSE_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn compose_for_editor_normalizes_yaml() {
+        let json = "{\"services\":{\"web\":{\"image\":\"nginx\"}}}";
+        let yaml = compose_for_editor(json);
+        assert!(yaml.contains("services:"));
+        assert!(yaml.contains("image: nginx"));
     }
 
     #[test]

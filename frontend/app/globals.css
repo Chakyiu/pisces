@@ -500,6 +500,7 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 .compose-editor { display: grid; gap: 8px; min-width: 0; }
 .compose-editor h2 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
 .compose-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.compose-editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .compose-docs { margin: 0; }
 .compose-well { display: grid; grid-template-columns: 44px minmax(0, 1fr); min-height: 320px; max-height: 65vh; overflow: hidden; border: 1px solid var(--border); border-radius: var(--radius); background: var(--canvas); }
 .compose-gutter { overflow: hidden; margin: 0; padding: 10px 8px; color: var(--text-muted); text-align: right; font-family: var(--font-mono); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; user-select: none; }

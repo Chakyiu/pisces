@@ -10,6 +10,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 tokio = { version = "1.54.1", features = ["full"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+serde_yaml = "0.9.34"
 
 # Docker daemon client. Windows: named pipe //./pipe/docker_engine.
 bollard = "=0.21.1"

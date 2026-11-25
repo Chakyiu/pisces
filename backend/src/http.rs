@@ -319,6 +319,18 @@ pub fn router(state: AppState) -> Router {
             get(get_stack).put(update_stack).delete(delete_stack),
         )
         .route(
+            "/api/endpoints/{id}/stacks/{project}/start",
+            post(stack_start),
+        )
+        .route(
+            "/api/endpoints/{id}/stacks/{project}/stop",
+            post(stack_stop),
+        )
+        .route(
+            "/api/endpoints/{id}/stacks/{project}/restart",
+            post(stack_restart),
+        )
+        .route(
             "/api/endpoints/{id}/containers/{container_id}",
             get(container_detail).delete(delete_container),
         )
@@ -1568,6 +1580,7 @@ async fn apply_stack_create(
         &dir,
         &candidate,
         env_file.as_deref(),
+        false,
     )
     .await
     {
@@ -1657,6 +1670,8 @@ async fn get_stack(
                 entry.value.clear();
             }
         }
+    } else if let Some(compose) = view.compose.as_mut() {
+        *compose = stacks::compose_for_editor(compose);
     }
     Ok(Json(view))
 }
@@ -1742,7 +1757,9 @@ async fn apply_stack_update(
         }
         let candidate = dir.join("compose.yaml.new");
         let env_file = stack_env_for_apply(&dir);
-        if let Err(error) = stacks::up(&project, &dir, &candidate, env_file.as_deref()).await {
+        if let Err(error) = stacks::up(&project, &dir, &candidate, env_file.as_deref(), false)
+            .await
+        {
             lock(state).keep_failed_create(&endpoint.id, &project, &error.message);
             return Err(error);
         }
@@ -1771,6 +1788,7 @@ async fn apply_stack_update(
         &dir,
         &dir.join("compose.yaml.new"),
         env_file.as_deref(),
+        true,
     )
     .await
     {
@@ -1783,6 +1801,67 @@ async fn apply_stack_update(
         .commit_stack_file(&endpoint.id, &project)
         .map_err(ApiError::deploy)?;
     Ok(())
+}
+
+async fn stack_compose_lifecycle(
+    state: &AppState,
+    endpoint: &Endpoint,
+    project: &str,
+    action: &str,
+) -> Result<(), ApiError> {
+    stacks::validate_project_name(project)?;
+    let _apply = state.stack_apply.lock(&endpoint.id, project).await;
+    let has_file = lock(state)
+        .stack_file(&endpoint.id, project)
+        .is_some();
+    if !has_file {
+        return Err(ApiError::validation(
+            "Pisces does not have a Compose file for this stack, so Compose cannot run the whole stack. Restart the containers instead.",
+        ));
+    }
+    let dir = lock(state)
+        .create_stack_dir(&endpoint.id, project)
+        .map_err(ApiError::daemon)?;
+    let compose_file = dir.join("compose.yaml");
+    match action {
+        "start" => stacks::start(project, &dir, &compose_file).await,
+        "stop" => stacks::stop(project, &dir, &compose_file).await,
+        "restart" => stacks::restart(project, &dir, &compose_file).await,
+        _ => Err(ApiError::validation("Unknown stack action.")),
+    }
+}
+
+async fn stack_start(
+    State(state): State<AppState>,
+    Path((id, project)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let endpoint = require_docker(&state, &id)?;
+    same_origin_guard(&headers)?;
+    stack_compose_lifecycle(&state, &endpoint, &project, "start").await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stack_stop(
+    State(state): State<AppState>,
+    Path((id, project)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let endpoint = require_docker(&state, &id)?;
+    same_origin_guard(&headers)?;
+    stack_compose_lifecycle(&state, &endpoint, &project, "stop").await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn stack_restart(
+    State(state): State<AppState>,
+    Path((id, project)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let endpoint = require_docker(&state, &id)?;
+    same_origin_guard(&headers)?;
+    stack_compose_lifecycle(&state, &endpoint, &project, "restart").await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn delete_stack(
