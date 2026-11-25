@@ -1,6 +1,7 @@
 "use client";
 
-import { useRef, useState, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import { composeForEditor } from "../../../../../lib/compose-yaml";
 
 export function ComposeEditor({
   value,
@@ -32,10 +33,27 @@ export function ComposeEditor({
         setFileError("The file was empty.");
         return;
       }
-      onChange(text);
+      onChange(composeForEditor(text));
     } catch {
       setFileError("Could not read that file.");
     }
+  }
+
+  function paste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    if (disabled) return;
+    const raw = event.clipboardData.getData("text");
+    if (!raw.trim()) return;
+    const normalized = composeForEditor(raw);
+    if (normalized === raw) return;
+    event.preventDefault();
+    const field = area.current;
+    if (!field) {
+      onChange(normalized);
+      return;
+    }
+    const start = field.selectionStart ?? value.length;
+    const end = field.selectionEnd ?? value.length;
+    onChange(value.slice(0, start) + normalized + value.slice(end));
   }
 
   async function copy() {
@@ -84,6 +102,7 @@ export function ComposeEditor({
           value={value}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
+          onPaste={paste}
           onScroll={(event) => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }}
         />
       </div>
