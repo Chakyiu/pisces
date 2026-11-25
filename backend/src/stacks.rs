@@ -168,8 +168,14 @@ pub async fn restart(
     project: &str,
     directory: &Path,
     compose_file: &Path,
+    repull: bool,
 ) -> Result<(), ApiError> {
-    run(project, directory, compose_file, None, "restart", false).await
+    if repull {
+        run(project, directory, compose_file, None, "pull", false).await?;
+        run(project, directory, compose_file, None, "up", true).await
+    } else {
+        run(project, directory, compose_file, None, "restart", false).await
+    }
 }
 
 async fn run(

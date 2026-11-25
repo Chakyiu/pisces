@@ -157,6 +157,14 @@ struct DuplicateBody {
     ports: Option<Vec<String>>,
     mounts: Option<Vec<docker::MountEdit>>,
     restart_policy: Option<String>,
+    #[serde(default)]
+    repull: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct StackRepullBody {
+    #[serde(default)]
+    repull: bool,
 }
 
 #[derive(Deserialize)]
@@ -1163,15 +1171,19 @@ async fn execute_proposal(state: &AppState, proposal: &access::Proposal) -> Resu
             refusal_for(state, &mutation, &reachable)?;
             let name = docker::checked_container_name(&body.name)?;
             let edits = docker::ContainerEdits {
-                image: body.image,
-                command: body.command,
-                entrypoint: body.entrypoint,
+                image: body.image.clone(),
+                command: body.command.clone(),
+                entrypoint: body.entrypoint.clone(),
                 env: None,
                 labels: None,
-                ports: body.ports,
+                ports: body.ports.clone(),
                 mounts: None,
-                restart: body.restart_policy,
+                restart: body.restart_policy.clone(),
             };
+            if body.repull {
+                let image = docker::image_for_edits(&source, &edits).await?;
+                docker::pull_image(&image).await?;
+            }
             let created = docker::duplicate_or_replace(&source, &name, &edits).await?;
             access::copy_policy(
                 &state.data_dir,
@@ -1808,6 +1820,7 @@ async fn stack_compose_lifecycle(
     endpoint: &Endpoint,
     project: &str,
     action: &str,
+    repull: bool,
 ) -> Result<(), ApiError> {
     stacks::validate_project_name(project)?;
     let _apply = state.stack_apply.lock(&endpoint.id, project).await;
@@ -1826,7 +1839,7 @@ async fn stack_compose_lifecycle(
     match action {
         "start" => stacks::start(project, &dir, &compose_file).await,
         "stop" => stacks::stop(project, &dir, &compose_file).await,
-        "restart" => stacks::restart(project, &dir, &compose_file).await,
+        "restart" => stacks::restart(project, &dir, &compose_file, repull).await,
         _ => Err(ApiError::validation("Unknown stack action.")),
     }
 }
@@ -1838,7 +1851,7 @@ async fn stack_start(
 ) -> Result<StatusCode, ApiError> {
     let endpoint = require_docker(&state, &id)?;
     same_origin_guard(&headers)?;
-    stack_compose_lifecycle(&state, &endpoint, &project, "start").await?;
+    stack_compose_lifecycle(&state, &endpoint, &project, "start", false).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1849,7 +1862,7 @@ async fn stack_stop(
 ) -> Result<StatusCode, ApiError> {
     let endpoint = require_docker(&state, &id)?;
     same_origin_guard(&headers)?;
-    stack_compose_lifecycle(&state, &endpoint, &project, "stop").await?;
+    stack_compose_lifecycle(&state, &endpoint, &project, "stop", false).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1857,10 +1870,12 @@ async fn stack_restart(
     State(state): State<AppState>,
     Path((id, project)): Path<(String, String)>,
     headers: HeaderMap,
+    body: Result<Json<StackRepullBody>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let endpoint = require_docker(&state, &id)?;
     same_origin_guard(&headers)?;
-    stack_compose_lifecycle(&state, &endpoint, &project, "restart").await?;
+    let repull = body.map(|Json(body)| body.repull).unwrap_or(false);
+    stack_compose_lifecycle(&state, &endpoint, &project, "restart", repull).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2466,15 +2481,19 @@ async fn apply_duplicate(
     let _ = state;
     let name = docker::checked_container_name(&body.name)?;
     let edits = docker::ContainerEdits {
-        image: body.image,
-        command: body.command,
-        entrypoint: body.entrypoint,
-        env: body.env,
-        labels: body.labels,
-        ports: body.ports,
-        mounts: body.mounts,
-        restart: body.restart_policy,
+        image: body.image.clone(),
+        command: body.command.clone(),
+        entrypoint: body.entrypoint.clone(),
+        env: body.env.clone(),
+        labels: body.labels.clone(),
+        ports: body.ports.clone(),
+        mounts: body.mounts.clone(),
+        restart: body.restart_policy.clone(),
     };
+    if body.repull {
+        let image = docker::image_for_edits(source, &edits).await?;
+        docker::pull_image(&image).await?;
+    }
     // Keeping the original name is Portainer's "Duplicate/Edit" replace path.
     docker::duplicate_or_replace(source, &name, &edits)
         .await

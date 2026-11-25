@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { ApiError, api } from "../lib/api";
 import type { EnvValue, LabelValue, MountEdit } from "../lib/types";
 import { Dialog } from "./bits";
+import { ImagePullConfirmDialog } from "./image-pull-confirm-dialog";
 
 type ContainerConfig = {
   name: string;
@@ -46,6 +47,7 @@ export function ContainerDuplicateDialog({
   const [restart, setRestart] = useState("no");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [confirmDeploy, setConfirmDeploy] = useState(false);
 
   useEffect(() => {
     api<ContainerConfig>(
@@ -70,12 +72,12 @@ export function ContainerDuplicateDialog({
   // Same name selects the recreate/replace path; a different name duplicates.
   const replace = Boolean(config) && name.trim().toLowerCase() === config?.name.toLowerCase();
 
-  async function submit() {
-    if (!config) return;
+  function buildBody(repull: boolean): Record<string, unknown> {
+    if (!config) return { name: "", repull };
     const nextPorts = ports.split("\n").map((line) => line.trim()).filter(Boolean);
     const nextCommand = lines(command);
     const nextEntrypoint = lines(entrypoint);
-    const body: Record<string, unknown> = { name: name.trim() };
+    const body: Record<string, unknown> = { name: name.trim(), repull };
     if (image.trim() !== config.image) body.image = image.trim();
     if (command !== config.command.join("\n")) body.command = nextCommand;
     if (entrypoint !== config.entrypoint.join("\n")) body.entrypoint = nextEntrypoint;
@@ -84,18 +86,24 @@ export function ContainerDuplicateDialog({
     if (JSON.stringify(labels) !== JSON.stringify(config.labels)) body.labels = labels;
     if (JSON.stringify(mounts) !== JSON.stringify(config.mounts)) body.mounts = mounts;
     if (restart !== config.restartPolicy) body.restart_policy = restart;
+    return body;
+  }
+
+  async function submit(repull: boolean) {
+    if (!config) return;
 
     setPending(true);
     setError("");
     try {
       const created = await api<{ id: string; name: string }>(
         `/api/endpoints/${endpointId}/containers/${encodeURIComponent(containerId)}/duplicate`,
-        { method: "POST", timeoutMs: 120_000, body },
+        { method: "POST", timeoutMs: 310_000, body: buildBody(repull) },
       );
       onCreated(created);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Container edit failed. Check its state before retrying.");
       setPending(false);
+      setConfirmDeploy(false);
     }
   }
 
@@ -212,12 +220,26 @@ export function ContainerDuplicateDialog({
           {error ? <p className="field-error">{error}</p> : null}
           <div className="dialog-actions">
             <button className="btn" type="button" onClick={onClose}>Cancel</button>
-            <button className={replace ? "btn danger" : "btn primary"} type="button" disabled={pending} onClick={() => void submit()}>
-              {pending ? (replace ? "Replacing…" : "Duplicating…") : replace ? "Replace" : "Duplicate"}
+            <button className={replace ? "btn danger" : "btn primary"} type="button" disabled={pending} onClick={() => setConfirmDeploy(true)}>
+              {replace ? "Replace" : "Duplicate"}
             </button>
           </div>
         </>
       )}
+      {confirmDeploy && config ? (
+        <ImagePullConfirmDialog
+          title={replace ? `Replace ${config.name}?` : `Duplicate ${config.name}?`}
+          intro={
+            replace
+              ? `Pisces will stop ${config.name}, deploy a replacement from these settings, and remove the original once the replacement is running.`
+              : `Pisces will create a new container from these settings. Choose whether to pull the image from the registry first.`
+          }
+          confirmLabel={replace ? "Replace" : "Duplicate"}
+          pending={pending}
+          onClose={() => setConfirmDeploy(false)}
+          onConfirm={(repull) => void submit(repull)}
+        />
+      ) : null}
     </Dialog>
   );
 }

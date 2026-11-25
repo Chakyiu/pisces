@@ -15,13 +15,13 @@ use bollard::models::{
     NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, InspectContainerOptions, ListContainersOptions,
-    ListImagesOptions, ListNetworksOptions, ListVolumesOptions, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder, RemoveImageOptions, RemoveVolumeOptions,
+    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, InspectContainerOptions,
+    ListContainersOptions, ListImagesOptions, ListNetworksOptions, ListVolumesOptions,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptions, RemoveVolumeOptions,
     RenameContainerOptionsBuilder, StopContainerOptions,
 };
 use bollard::Docker;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
@@ -30,6 +30,7 @@ pub const ENGINE_DOWN: &str =
     "The engine did not answer within 10 seconds. Nothing on this page was changed.";
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+const PULL_TIMEOUT: Duration = Duration::from_secs(300);
 
 const COMPOSE_PROJECT: &str = "com.docker.compose.project";
 const COMPOSE_SERVICE: &str = "com.docker.compose.service";
@@ -1682,6 +1683,34 @@ pub async fn list_images() -> Result<Vec<ImageOut>, ApiError> {
     let mut items: Vec<ImageOut> = images.into_iter().map(image_out).collect();
     items.sort_by_key(|item| std::cmp::Reverse(item.created));
     Ok(items)
+}
+
+pub async fn pull_image(reference: &str) -> Result<(), ApiError> {
+    let reference = checked_image_ref(reference)?;
+    let docker = docker()?;
+    let options = CreateImageOptionsBuilder::default()
+        .from_image(&reference)
+        .build();
+    let stream = docker.create_image(Some(options), None, None);
+    let pull = tokio::time::timeout(PULL_TIMEOUT, stream.try_collect::<Vec<_>>());
+    tokio::pin!(pull);
+    match pull.await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(err)) => Err(map_err(err)),
+        Err(_) => Err(ApiError::daemon(
+            "The image pull did not finish within five minutes.",
+        )),
+    }
+}
+
+pub async fn image_for_edits(source: &str, edits: &ContainerEdits) -> Result<String, ApiError> {
+    if let Some(image) = edits.image.as_deref().map(str::trim) {
+        if !image.is_empty() {
+            return checked_image_ref(image);
+        }
+    }
+    let config = container_config(source).await?;
+    checked_image_ref(&config.image)
 }
 
 pub async fn remove_image(reference: &str) -> Result<(), ApiError> {
