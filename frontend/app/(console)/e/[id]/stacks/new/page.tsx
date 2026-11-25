@@ -7,6 +7,7 @@ import { ApiError, api } from "../../../../../../lib/api";
 import { useConsole, PageFrame } from "../../../../../../components/shell";
 import { Dialog, Loading } from "../../../../../../components/bits";
 import { DockerView } from "../../../../../../components/gate";
+import { composeYamlSyntaxError } from "../../../../../../lib/compose-yaml";
 import { ComposeEditor } from "../compose-editor";
 import { StackEnvEditor, stackEnvPayload } from "../stack-env-editor";
 import type { EnvValue } from "../../../../../../lib/types";
@@ -26,7 +27,7 @@ function nameError(value: string) {
 function fileError(value: string) {
   if (!value.trim()) return "Stack file content is required";
   if (new TextEncoder().encode(value).byteLength > MAX_BYTES) return "This file is larger than 1 MB. Pisces accepts Compose files up to 1 MB.";
-  return "";
+  return composeYamlSyntaxError(value);
 }
 
 export default function NewStackPage() {
