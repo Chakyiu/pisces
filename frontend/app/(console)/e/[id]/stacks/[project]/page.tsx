@@ -343,7 +343,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
                       <td className="col-check"><label className="check"><input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.id])} onChange={() => setPicked((current) => { const next = { ...current }; if (next[item.id]) delete next[item.id]; else next[item.id] = item; return next; })} /></label></td>
                       <td className="name-cell"><Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link></td>
                       <td><Badge state={item.state} /></td>
-                      <td><Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label="Logs" title="Logs"><Icon name="logs" /></Link></td>
+                      <td><Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}#container-logs`} aria-label="Logs" title="Logs"><Icon name="logs" /></Link></td>
                       <td className="mono name-cell" title={item.image}>{item.image}</td><td className="mono">{age(item.created)}</td><td className="mono">{portList(item.ports)}</td>
                     </tr>
                   ))}</tbody>
