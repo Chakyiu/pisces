@@ -13,6 +13,7 @@ import { composeYamlSyntaxError } from "../../../../../../lib/compose-yaml";
 import { ComposeEditor } from "../compose-editor";
 import { StackEnvEditor, stackEnvPayload } from "../stack-env-editor";
 import type { EnvValue } from "../../../../../../lib/types";
+import { ImagePullConfirmDialog } from "../../../../../../components/image-pull-confirm-dialog";
 
 const LOST_REQUEST = "The console lost the deploy request. Check the stack list before trying again. The engine may still be applying it.";
 const MAX_BYTES = 1_048_576;
@@ -62,6 +63,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
   const [pending, setPending] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmUpdate, setConfirmUpdate] = useState(false);
+  const [confirmRestart, setConfirmRestart] = useState(false);
   const [remove, setRemove] = useState(false);
   const [picked, setPicked] = useState<Record<string, Container>>({});
   const [offset, setOffset] = useState(0);
@@ -195,7 +197,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
     }
   }
 
-  async function performStack(action: "start" | "stop" | "restart") {
+  async function performStack(action: "start" | "stop" | "restart", repull = false) {
     setPending(action);
     setAlert("");
     const useCompose = detail?.origin === "managed" && detail.hasFile;
@@ -203,6 +205,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
       if (useCompose) {
         await api(`/api/endpoints/${id}/stacks/${encodeURIComponent(project)}/${action}`, {
           method: "POST",
+          body: action === "restart" ? { repull } : undefined,
           timeoutMs: 310_000,
         });
       } else {
@@ -228,7 +231,17 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
       setAlert(`${action[0].toUpperCase()}${action.slice(1)} failed. ${message}`);
     } finally {
       setPending("");
+      if (action === "restart") setConfirmRestart(false);
     }
+  }
+
+  function restartStack() {
+    const useCompose = detail?.origin === "managed" && detail.hasFile;
+    if (useCompose) {
+      setConfirmRestart(true);
+      return;
+    }
+    void performStack("restart");
   }
 
   async function deleteStack() {
@@ -303,7 +316,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
               <div className="bulk">
                 <button className="btn" type="button" disabled={Boolean(pending) || !rowsStopped} onClick={() => void performStack("start")}>{pending === "start" ? "Starting…" : "Start stack"}</button>
                 <button className="btn" type="button" disabled={Boolean(pending) || !rowsRunning} onClick={() => void performStack("stop")}>{pending === "stop" ? "Stopping…" : "Stop stack"}</button>
-                <button className="btn" type="button" disabled={Boolean(pending) || rows.length === 0} onClick={() => void performStack("restart")}>{pending === "restart" ? "Restarting…" : "Restart stack"}</button>
+                <button className="btn" type="button" disabled={Boolean(pending) || rows.length === 0} onClick={restartStack}>{pending === "restart" ? "Restarting…" : "Restart stack"}</button>
                 <button className="btn danger" type="button" disabled={Boolean(pending)} aria-label={`${detail.origin === "managed" ? "Delete stack" : "Remove containers"} ${project}`} onClick={() => setConfirmDelete(true)}>
                   {pending === "delete" || pending === "remove" ? (detail.origin === "managed" ? "Deleting…" : "Removing…") : detail.origin === "managed" ? "Delete stack" : "Remove containers"}
                 </button>
@@ -380,6 +393,16 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
           )}
         </section>
       )}
+      {confirmRestart ? (
+        <ImagePullConfirmDialog
+          title={`Restart stack ${project}?`}
+          intro={`Pisces will restart every service in ${project} on ${endpointName}. Choose whether to pull images from the registry first.`}
+          confirmLabel="Restart stack"
+          pending={pending === "restart"}
+          onClose={() => setConfirmRestart(false)}
+          onConfirm={(repull) => void performStack("restart", repull)}
+        />
+      ) : null}
       {confirmUpdate ? (
         <Dialog title={adopting ? (detail.origin === "discovered" ? `Replace ${project}?` : `Deploy ${project}?`) : `Update ${project}?`} onClose={() => setConfirmUpdate(false)}>
           <p>

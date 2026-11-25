@@ -735,6 +735,21 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 }
 .dialog h2 { margin: 0; font-size: 18px; font-weight: 600; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.pull-choices { display: grid; gap: 8px; }
+.pull-choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+.pull-choice:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+.pull-choice input { margin-top: 3px; }
+.pull-choice strong { display: block; font-weight: 600; }
+.pull-choice .help { display: block; margin-top: 4px; color: var(--text-muted); font-size: 13px; }
 .edit-rows { display: grid; gap: 8px; }
 .edit-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto; gap: 8px; align-items: center; }
 .mount-edit-row { grid-template-columns: minmax(7.25rem, auto) minmax(100px, 1fr) minmax(100px, 1fr) minmax(6.5rem, auto) auto; }
