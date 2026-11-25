@@ -4,9 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ApiError, api } from "../../../../../lib/api";
 import type { Stack, StackContainer } from "../../../../../lib/types";
-import { Badge, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { Badge, Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { ImagePullConfirmDialog } from "../../../../../components/image-pull-confirm-dialog";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
+import { listedNames } from "../../../../../lib/ux";
 
 function up(container: StackContainer) {
   return container.state === "running" || container.state === "restarting";
@@ -34,10 +36,13 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const [picked, setPicked] = useState<Record<string, Stack>>({});
   const [pending, setPending] = useState("");
   const [alert, setAlert] = useState("");
+  const [remove, setRemove] = useState<Stack[] | null>(null);
+  const [restart, setRestart] = useState<Stack[] | null>(null);
   useEffect(() => {
     const timer = setTimeout(() => { setAppliedQ(q); setOffset(0); }, 200);
     return () => clearTimeout(timer);
   }, [q]);
+  useEffect(() => { setPicked({}); }, [appliedQ, offset]);
   const cursor = offset ? `&cursor=${offset}` : "";
   const query = usePaged<Stack>(`/api/endpoints/${id}/stacks?q=${encodeURIComponent(appliedQ)}${cursor}&limit=50`);
   refreshRef.current = () => { void query.reload(); };
@@ -66,25 +71,60 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
     });
   }
 
-  async function act(action: "start" | "stop" | "restart") {
+  function usesCompose(stack: Stack) {
+    return stack.origin === "managed" && stack.hasFile;
+  }
+
+  async function act(action: "start" | "stop" | "restart", targets = selected, repull = false) {
     setPending(action);
     setAlert("");
     try {
-      for (const stack of selected) {
-        const targets = stack.containers.filter((container) =>
+      for (const stack of targets) {
+        if (action === "restart" && usesCompose(stack)) {
+          await api(`/api/endpoints/${id}/stacks/${encodeURIComponent(stack.project)}/restart`, {
+            method: "POST",
+            body: { repull },
+            timeoutMs: 310_000,
+          });
+          continue;
+        }
+        const containers = stack.containers.filter((container) =>
           action === "restart" ? true : action === "start" ? !up(container) : up(container),
         );
-        for (const container of targets) {
+        for (const container of containers) {
           await api(`/api/endpoints/${id}/containers/${encodeURIComponent(container.id)}/${action}`, { method: "POST" });
         }
       }
       setPicked({});
+      setRestart(null);
       await query.reload();
     } catch (err) {
       const message = err instanceof ApiError ? err.message : "The engine did not answer.";
       if (err instanceof ApiError) publishApiError(err.code);
       const label = action[0].toUpperCase() + action.slice(1);
       setAlert(`${label} failed. ${message}`);
+      await query.reload();
+    } finally {
+      setPending("");
+    }
+  }
+
+  async function removeStacks() {
+    if (!remove) return;
+    setPending("remove");
+    setAlert("");
+    try {
+      for (const stack of remove) {
+        await api(`/api/endpoints/${id}/stacks/${encodeURIComponent(stack.project)}`, { method: "DELETE", timeoutMs: 310_000 });
+      }
+      setRemove(null);
+      setPicked({});
+      await query.reload();
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "The engine did not answer.";
+      if (err instanceof ApiError) publishApiError(err.code);
+      setAlert(`Delete failed. ${message}`);
+      await query.reload();
     } finally {
       setPending("");
     }
@@ -107,8 +147,11 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <button className="btn" type="button" disabled={disabled || !canStop} onClick={() => void act("stop")}>
               <Icon name="stop" /> {label("stop", "Stopping…", "Stop")}
             </button>
-            <button className="btn" type="button" disabled={disabled || selected.length === 0} onClick={() => void act("restart")}>
+            <button className="btn" type="button" disabled={disabled || selected.length === 0} onClick={() => setRestart(selected)}>
               <Icon name="restart" /> {label("restart", "Restarting…", "Restart")}
+            </button>
+            <button className="btn danger" type="button" disabled={disabled || selected.length === 0} onClick={() => setRemove(selected)}>
+              <Icon name="trash" /> Delete
             </button>
           </div>
         </div>
@@ -175,6 +218,44 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
           </div>
         ) : null}
       </section>
+      {remove ? (
+        <Dialog title={remove.length === 1 ? `Delete stack ${remove[0].project}?` : `Delete ${remove.length} stacks?`} onClose={() => setRemove(null)}>
+          <p>Selected: {listedNames(remove.map((stack) => stack.project))}.</p>
+          {remove.some((stack) => stack.origin === "managed") ? (
+            <p>Managed ({listedNames(remove.filter((stack) => stack.origin === "managed").map((stack) => stack.project))}): containers are removed and the Compose file Pisces stored is deleted. Named volumes stay.</p>
+          ) : null}
+          {remove.some((stack) => stack.origin !== "managed") ? (
+            <p>Discovered ({listedNames(remove.filter((stack) => stack.origin !== "managed").map((stack) => stack.project))}): containers are stopped and removed. Pisces did not store a Compose file for these. Named volumes stay.</p>
+          ) : null}
+          <div className="dialog-actions">
+            <button className="btn" data-focus="first" type="button" onClick={() => setRemove(null)}>Cancel</button>
+            <button className="btn danger" type="button" disabled={pending === "remove"} onClick={() => void removeStacks()}>
+              {pending === "remove" ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Dialog>
+      ) : null}
+      {restart && restart.some(usesCompose) ? (
+        <ImagePullConfirmDialog
+          title={restart.length === 1 ? `Restart stack ${restart[0].project}?` : `Restart ${restart.length} stacks?`}
+          intro={`Managed stacks restart through Compose. ${restart.some((stack) => !usesCompose(stack)) ? "Discovered stacks in this selection restart their containers on the engine and do not pull images." : "Choose whether to pull images from the registry first."}`}
+          confirmLabel="Restart"
+          pending={pending === "restart"}
+          onClose={() => setRestart(null)}
+          onConfirm={(repull) => void act("restart", restart, repull)}
+        />
+      ) : null}
+      {restart && !restart.some(usesCompose) ? (
+        <Dialog title={restart.length === 1 ? `Restart stack ${restart[0].project}?` : `Restart ${restart.length} stacks?`} onClose={() => setRestart(null)}>
+          <p>Restart {listedNames(restart.map((stack) => stack.project))} by restarting the containers already on {name}. This does not pull images.</p>
+          <div className="dialog-actions">
+            <button className="btn" data-focus="first" type="button" onClick={() => setRestart(null)}>Cancel</button>
+            <button className="btn primary" type="button" disabled={pending === "restart"} onClick={() => void act("restart", restart, false)}>
+              {pending === "restart" ? "Restarting…" : "Restart"}
+            </button>
+          </div>
+        </Dialog>
+      ) : null}
     </>
   );
 }

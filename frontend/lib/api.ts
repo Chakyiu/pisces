@@ -1,5 +1,13 @@
 const ENGINE_DOWN =
   "The engine did not answer within 10 seconds. Nothing on this page was changed.";
+const API_DOWN =
+  "The Pisces API did not answer within 10 seconds. Nothing on this page was changed.";
+
+function fallbackMessage(path: string, failureMessage?: string) {
+  if (failureMessage) return failureMessage;
+  if (path === "/api/session" || path.startsWith("/api/session?")) return API_DOWN;
+  return ENGINE_DOWN;
+}
 
 export class ApiError extends Error {
   code: string;
@@ -53,7 +61,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     if (!res.ok) {
       throw new ApiError(
         data.error?.code ?? "daemon_unreachable",
-        data.error?.message ?? ENGINE_DOWN,
+        data.error?.message ?? fallbackMessage(path),
         Boolean(data.error?.retryable),
       );
     }
@@ -61,7 +69,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
   } catch (err) {
     if (err instanceof ApiError) throw err;
     if (options.signal?.aborted) throw new ApiError("cancelled", "cancelled", false);
-    throw new ApiError("daemon_unreachable", options.failureMessage ?? ENGINE_DOWN, true);
+    throw new ApiError("daemon_unreachable", fallbackMessage(path, options.failureMessage), true);
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", onParentAbort);

@@ -16,7 +16,7 @@ import { PageFrame } from "../../../../../../components/shell";
 
 type ContainerTab = "logs" | "inspect" | "stats" | "console" | "attach";
 
-const CONTAINER_TABS: ContainerTab[] = ["logs", "inspect", "stats", "console", "attach"];
+const CONTAINER_TABS: ContainerTab[] = ["inspect", "logs", "console", "stats", "attach"];
 
 function tabFromQuery(raw: string | null): ContainerTab | null {
   if (raw === "logs" || raw === "inspect" || raw === "stats" || raw === "console" || raw === "attach") return raw;
@@ -223,12 +223,41 @@ function Body({
   return (
     <div className="stack">
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
+      <div className="command-bar">
+        <div className="identity">
+          <strong className="mono" title={detail.name}>{detail.name}</strong>
+          <Badge state={detail.state} />
+        </div>
+        <div className="bulk" aria-label="Actions">
+          <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
+            <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+          </button>
+          <button className="btn" type="button" disabled={Boolean(pending) || !isRunning} onClick={() => void act("stop")}>
+            <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
+          </button>
+          <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
+            <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
+          </button>
+          <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
+            <Icon name="trash" /> Remove
+          </button>
+          <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
+            <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
+          </button>
+          <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
+            Edit name / restart
+          </button>
+          <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
+            <Icon name="copy" /> Duplicate/Edit
+          </button>
+        </div>
+      </div>
       <div className="stack-tabs" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
         {CONTAINER_TABS.map((key) => (
           <button
             key={key}
             id={`container-tab-${key}`}
-            className="stack-tab"
+            className={`stack-tab${key === "stats" || key === "attach" ? " soon" : ""}`}
             type="button"
             role="tab"
             aria-selected={tab === key}
@@ -237,9 +266,9 @@ function Body({
           >
             {key === "logs" ? <><Icon name="logs" /> Logs</> : null}
             {key === "inspect" ? <><Icon name="eye" /> Inspect</> : null}
-            {key === "stats" ? "Stats" : null}
+            {key === "stats" ? <>Stats <span className="nav-soon">soon</span></> : null}
             {key === "console" ? <><Icon name="console" /> Console</> : null}
-            {key === "attach" ? "Attach" : null}
+            {key === "attach" ? <>Attach <span className="nav-soon">soon</span></> : null}
           </button>
         ))}
       </div>
@@ -250,35 +279,6 @@ function Body({
         aria-labelledby="container-tab-inspect"
         hidden={tab !== "inspect"}
       >
-        <section className="widget">
-          <h2>Actions</h2>
-          <div className="widget-pad">
-            <div className="bulk">
-              <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
-                <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
-              </button>
-              <button className="btn" type="button" disabled={Boolean(pending) || !isRunning} onClick={() => void act("stop")}>
-                <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
-              </button>
-              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
-                <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
-              </button>
-              <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
-                <Icon name="trash" /> Remove
-              </button>
-              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
-                <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
-              </button>
-              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
-                Edit name / restart
-              </button>
-              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
-                <Icon name="copy" /> Duplicate/Edit
-              </button>
-            </div>
-          </div>
-        </section>
-        <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
         <section className="widget">
           <h2>Status</h2>
           <div className="facts">
@@ -305,6 +305,7 @@ function Body({
             <Fact label="Started" value={stamp(detail.started)} mono />
           </div>
         </section>
+        <ContainerAiAccess endpointId={endpointId} containerId={detail.id} containerName={detail.name} />
       </section>
       <section
         id="container-panel-logs"
@@ -395,9 +396,9 @@ function Body({
       {recreateOpen ? (
         <Dialog title={`Recreate ${detail.name}?`} onClose={() => setRecreateOpen(false)}>
           <p>
-            A new container is built from {detail.name}’s current config and takes its name
+            A new container is built from {detail.name}’s current config and the image already on this machine. It does not pull from a registry
             {isRunning ? `; ${detail.name} is stopped first` : ""}. The writable layer is discarded
-            and the container id changes. Named volumes and custom networks carry over.
+            and the container id changes. Named volumes and custom networks carry over. Use Duplicate/Edit to pull a new image.
           </p>
           <div className="dialog-actions">
             <button className="btn" data-focus="first" type="button" onClick={() => setRecreateOpen(false)}>Cancel</button>

@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useId, useRef, useState, type ChangeEvent } from "react";
 import type { EnvValue } from "../../../../../lib/types";
 
 function parseDotenv(text: string): EnvValue[] {
@@ -39,6 +39,9 @@ export function StackEnvEditor({
   const [advanced, setAdvanced] = useState(false);
   const [bulk, setBulk] = useState(() => toDotenv(value));
   const [fileError, setFileError] = useState("");
+  const external = toDotenv(value);
+  // Reload replaces `value` from outside; the bulk buffer otherwise stays on the first load.
+  useEffect(() => { setBulk(external); }, [external]);
   const [revealed, setRevealed] = useState<Record<number, boolean>>({});
 
   function syncBulk(rows: EnvValue[]) {

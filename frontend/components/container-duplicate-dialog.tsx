@@ -48,6 +48,7 @@ export function ContainerDuplicateDialog({
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [confirmDeploy, setConfirmDeploy] = useState(false);
+  const [mode, setMode] = useState<"copy" | "replace">("copy");
 
   useEffect(() => {
     api<ContainerConfig>(
@@ -55,7 +56,8 @@ export function ContainerDuplicateDialog({
     )
       .then((body) => {
         setConfig(body);
-        setName(body.name);
+        setName(`${body.name}-copy`);
+        setMode("copy");
         setImage(body.image);
         setCommand(body.command.join("\n"));
         setEntrypoint(body.entrypoint.join("\n"));
@@ -69,8 +71,8 @@ export function ContainerDuplicateDialog({
       .catch(() => setError("The container's live config could not be read."));
   }, [endpointId, containerId]);
 
-  // Same name selects the recreate/replace path; a different name duplicates.
-  const replace = Boolean(config) && name.trim().toLowerCase() === config?.name.toLowerCase();
+  const sameName = Boolean(config) && name.trim().toLowerCase() === config?.name.toLowerCase();
+  const replace = mode === "replace" || sameName;
 
   function buildBody(repull: boolean): Record<string, unknown> {
     if (!config) return { name: "", repull };
@@ -130,9 +132,42 @@ export function ContainerDuplicateDialog({
         </>
       ) : (
         <>
+          <div className="pull-choices" role="radiogroup" aria-label="Duplicate mode">
+            <label className="pull-choice">
+              <input
+                type="radio"
+                name="duplicate-mode"
+                data-focus="first"
+                checked={mode === "copy"}
+                onChange={() => {
+                  setMode("copy");
+                  if (config && name.trim().toLowerCase() === config.name.toLowerCase()) setName(`${config.name}-copy`);
+                }}
+              />
+              <span>
+                <strong>Create copy</strong>
+                <span className="help">Leave the original running and start another container.</span>
+              </span>
+            </label>
+            <label className="pull-choice">
+              <input
+                type="radio"
+                name="duplicate-mode"
+                checked={mode === "replace"}
+                onChange={() => {
+                  setMode("replace");
+                  if (config) setName(config.name);
+                }}
+              />
+              <span>
+                <strong>Replace original in place</strong>
+                <span className="help">Stop the original and take its name. The writable layer is discarded.</span>
+              </span>
+            </label>
+          </div>
           <label className="label">
             Name
-            <input className="field" data-focus="first" value={name} onChange={(event) => setName(event.target.value)} />
+            <input className="field" value={name} disabled={mode === "replace"} onChange={(event) => setName(event.target.value)} />
           </label>
           <label className="label">
             Image

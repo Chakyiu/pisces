@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, api } from "../../lib/api";
+import { safeNextPath } from "../../lib/ux";
 import { Gate, Icon } from "../../components/bits";
 import { useSession } from "../../components/session";
 
@@ -16,16 +17,21 @@ export default function LoginPage() {
   const [passwordError, setPasswordError] = useState("");
   const [rejected, setRejected] = useState(false);
   const [ended, setEnded] = useState(false);
+  const [apiDown, setApiDown] = useState("");
   const [pending, setPending] = useState(false);
+
+  function returnPath() {
+    return safeNextPath(new URLSearchParams(window.location.search).get("next")) ?? "/home";
+  }
 
   useEffect(() => {
     setEnded(new URLSearchParams(window.location.search).get("ended") === "1" || (session.status === "out" && session.ended));
-    if (session.status === "in") router.replace("/home");
+    if (session.status === "in") router.replace(returnPath());
   }, [session, router]);
 
   if (session.status === "checking" || session.status === "in") return <Gate title="Checking session" />;
   if (session.status === "error") {
-    return <Gate title="The API did not answer within 10 seconds." onRetry={() => void session.refresh()} />;
+    return <Gate title={session.message || "The Pisces API did not answer within 10 seconds."} onRetry={() => void session.refresh()} />;
   }
 
   async function submit(event: FormEvent) {
@@ -44,12 +50,15 @@ export default function LoginPage() {
         allow401: true,
       });
       session.signedIn(body.username);
-      router.replace("/home");
+      router.replace(returnPath());
     } catch (err) {
       if (err instanceof ApiError && err.code === "unauthorized") {
         setRejected(true);
         setEnded(false);
+        setApiDown("");
         setPassword("");
+      } else {
+        setApiDown(err instanceof ApiError ? err.message : "The Pisces API did not answer within 10 seconds.");
       }
       setPending(false);
     }
@@ -69,6 +78,11 @@ export default function LoginPage() {
               <p>Check the username and password, then try again.</p>
             </div>
           ) : null}
+          {apiDown && !rejected ? (
+            <div className="alert bad" role="alert">
+              <strong>{apiDown}</strong>
+            </div>
+          ) : null}
           {ended && !rejected ? (
             <div className="alert" role="alert">
               <strong>Your session ended. Sign in again.</strong>
@@ -81,6 +95,7 @@ export default function LoginPage() {
               value={username}
               placeholder="Enter your username"
               autoComplete="username"
+              autoFocus
               disabled={pending}
               onBlur={() => setUsernameError(username.trim() ? "" : "Enter a username.")}
               onChange={(event) => setUsername(event.target.value)}

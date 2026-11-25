@@ -198,6 +198,7 @@ export function ContainerConsole({
           <button className="btn" type="button" title="Close console" onClick={onClose}>Close</button>
         </div>
       </div>
+      {user === "root" ? <p className="note" role="status">Running shell as root</p> : null}
       <div className="console-status" role={error ? "alert" : "status"} aria-live="polite">
         {error || (status === "connected" ? "Connected" : status === "connecting" ? "Connecting…" : status === "disconnecting" ? "Disconnecting…" : running ? "Disconnected" : "Start the container to use the console.")}
       </div>

@@ -1,29 +1,18 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../lib/api";
 import { age, bytes, imageLabel, shortId } from "../../../../../lib/format";
-import type { ImageItem } from "../../../../../lib/types";
+import type { ImageItem, Page } from "../../../../../lib/types";
+import { listedNames, parsePort } from "../../../../../lib/ux";
 import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
-import { DockerView, publishApiError, usePaged } from "../../../../../components/gate";
+import { DockerView, Pager, publishApiError } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
 
-function parsePort(raw: string): { host: number; container: number; protocol: string } | "empty" | null {
-  const value = raw.trim();
-  if (!value) return "empty";
-  const single = /^(\d{1,5})$/.exec(value);
-  if (single) {
-    const port = Number(single[1]);
-    if (port < 1 || port > 65535) return null;
-    return { host: port, container: port, protocol: "tcp" };
-  }
-  const pair = /^(\d{1,5}):(\d{1,5})(?:\/(tcp|udp|sctp))?$/i.exec(value);
-  if (!pair) return null;
-  const host = Number(pair[1]);
-  const container = Number(pair[2]);
-  if (host < 1 || host > 65535 || container < 1 || container > 65535) return null;
-  return { host, container, protocol: (pair[3] ?? "tcp").toLowerCase() };
+function extraTags(tags: string[]): string[] {
+  const primary = imageLabel(tags);
+  return tags.filter((tag) => tag && tag !== primary && tag !== "<none>:<none>");
 }
 
 export default function ImagesPage() {
@@ -45,8 +34,14 @@ export default function ImagesPage() {
 
 function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: { current: (() => void) | null } }) {
   const router = useRouter();
-  const query = usePaged<ImageItem>(`/api/endpoints/${id}/images?limit=50`);
-  refreshRef.current = () => { void query.reload(); };
+  const [q, setQ] = useState("");
+  const [applied, setApplied] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [page, setPage] = useState<Page<ImageItem> | null>(null);
+  const [status, setStatus] = useState<"loading" | "error" | "ready">("loading");
+  const [message, setMessage] = useState("");
+  const [attempts, setAttempts] = useState(0);
+  const [at, setAt] = useState<Date | undefined>();
   const [picked, setPicked] = useState<Record<string, ImageItem>>({});
   const [run, setRun] = useState<ImageItem | null>(null);
   const [remove, setRemove] = useState<ImageItem[] | null>(null);
@@ -55,8 +50,65 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
   const [portError, setPortError] = useState("");
   const [alert, setAlert] = useState("");
   const [pending, setPending] = useState("");
+  const loadGen = useRef(0);
 
-  const items = query.data?.items ?? [];
+  useEffect(() => {
+    const timer = setTimeout(() => { setApplied(q.trim()); setOffset(0); }, 200);
+    return () => clearTimeout(timer);
+  }, [q]);
+  useEffect(() => { setPicked({}); }, [applied, offset]);
+
+  async function load(retry: boolean) {
+    const gen = ++loadGen.current;
+    if (retry) setAttempts((value) => value + 1);
+    setStatus("loading");
+    try {
+      let next: Page<ImageItem>;
+      if (!applied) {
+        next = await api<Page<ImageItem>>(`/api/endpoints/${id}/images?limit=50${offset ? `&cursor=${offset}` : ""}`);
+      } else {
+        const matched: ImageItem[] = [];
+        let cursor: string | null | undefined;
+        let guard = 0;
+        const needle = applied.toLowerCase();
+        do {
+          if (gen !== loadGen.current) return;
+          const body = await api<Page<ImageItem>>(`/api/endpoints/${id}/images?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+          for (const item of body.items) {
+            const hay = `${item.tags.join(" ")} ${item.id}`.toLowerCase();
+            if (hay.includes(needle)) matched.push(item);
+          }
+          cursor = body.nextCursor;
+          guard += 1;
+          // shortcut: stops after 2000 images, raise the cap if a host has more
+        } while (cursor && guard < 40);
+        next = {
+          items: matched.slice(offset, offset + 50),
+          total: matched.length,
+          nextCursor: offset + 50 < matched.length ? String(offset + 50) : null,
+        };
+      }
+      if (gen !== loadGen.current) return;
+      setPage(next);
+      setStatus("ready");
+    } catch (err) {
+      if (gen !== loadGen.current) return;
+      if (err instanceof ApiError && err.code === "cancelled") return;
+      if (err instanceof ApiError) publishApiError(err.code);
+      setMessage(err instanceof ApiError ? err.message : "The engine did not answer within 10 seconds. Nothing on this page was changed.");
+      setAt(new Date());
+      setStatus("error");
+    }
+  }
+
+  useEffect(() => {
+    setAttempts(0);
+    void load(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, applied, offset]);
+  refreshRef.current = () => { void load(false); };
+
+  const items = page?.items ?? [];
   const selected = items.filter((item) => picked[item.id]);
   const allChecked = items.length > 0 && selected.length === items.length;
 
@@ -105,7 +157,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       }
       setRemove(null);
       setPicked({});
-      await query.reload();
+      await load(false);
     } catch (err) {
       if (err instanceof ApiError) publishApiError(err.code);
       setAlert(`Remove failed. ${err instanceof ApiError ? err.message : "The engine did not answer."}`);
@@ -119,19 +171,24 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
       <section className="widget">
         <div className="widget-head">
+          <input className="field search" placeholder="tag or id" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
           <button className="btn danger" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => setRemove(selected)}>
             <Icon name="trash" /> Remove
           </button>
         </div>
-        {query.status === "loading" && !query.data ? <Loading noun="images" /> : null}
-        {query.status === "error" ? (
-          <ErrorState title={`Docker endpoint ${name} is not responding.`} message={query.message} attempts={query.attempts} at={query.at} onRetry={query.retry} />
+        {status === "loading" && !page ? <Loading noun="images" /> : null}
+        {status === "error" ? (
+          <ErrorState title={`Docker endpoint ${name} is not responding.`} message={message} attempts={attempts} at={at} onRetry={() => void load(true)} />
         ) : null}
-        {query.status === "ready" && query.data?.items.length === 0 ? (
-          <Empty title={`No images on ${name}.`} body="Images show up when the engine already has them. This version does not pull or build." action={{ label: "Refresh", primary: true, onClick: query.retry }} />
+        {status === "ready" && page?.items.length === 0 ? (
+          applied ? (
+            <Empty title={`No images match “${applied}”.`} body="The filter is hiding every image on this engine." action={{ label: "Clear search", onClick: () => setQ("") }} />
+          ) : (
+            <Empty title={`No images on ${name}.`} body="Images show up when the engine already has them. This version does not pull or build." action={{ label: "Refresh", primary: true, onClick: () => void load(true) }} />
+          )
         ) : null}
-        {query.data && query.data.items.length > 0 ? (
+        {page && page.items.length > 0 ? (
           <div className="table-wrap">
             <table>
               <thead>
@@ -152,7 +209,10 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <input type="checkbox" aria-label={`Select ${imageLabel(item.tags)}`} checked={Boolean(picked[item.id])} onChange={() => toggle(item)} />
                       </label>
                     </td>
-                    <td className="mono name-cell" title={imageLabel(item.tags)}>{imageLabel(item.tags)}</td>
+                    <td className="mono name-cell" title={item.tags.join(", ") || item.id}>
+                      {imageLabel(item.tags)}
+                      {extraTags(item.tags).length ? <span className="tag-more">{extraTags(item.tags).join(", ")}</span> : null}
+                    </td>
                     <td className="mono" title={item.id}>{shortId(item.id)}</td>
                     <td className="mono">{bytes(item.sizeBytes)}</td>
                     <td className="mono">{age(item.created)}</td>
@@ -165,27 +225,30 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                 ))}
               </tbody>
             </table>
+            <Pager total={page.total} offset={offset} noun="images" nextCursor={page.nextCursor} onPrev={() => setOffset(Math.max(0, offset - 50))} onNext={() => page.nextCursor && setOffset(Number(page.nextCursor))} />
           </div>
         ) : null}
       </section>
       {run ? (
         <Dialog title="Run container" onClose={() => setRun(null)}>
-          <label className="label">Image<input className="field" readOnly value={imageLabel(run.tags)} /></label>
-          <label className="label">Name<input className="field" value={containerName} onChange={(event) => setContainerName(event.target.value)} /></label>
-          <label className="label">
-            Port
-            <input className="field" placeholder="8080:80" value={port} onBlur={() => setPortError(parsePort(port) === null ? "Use host:container, a single port, or leave this empty." : "")} onChange={(event) => setPort(event.target.value)} />
-            {portError ? <span className="field-error">{portError}</span> : null}
-          </label>
-          <div className="dialog-actions">
-            <button className="btn" type="button" onClick={() => setRun(null)}>Cancel</button>
-            <button className="btn primary" type="button" disabled={pending === "run"} onClick={() => void start()}>{pending === "run" ? "Running…" : "Run"}</button>
-          </div>
+          <form onSubmit={(event) => { event.preventDefault(); void start(); }}>
+            <label className="label">Image<input className="field" readOnly value={imageLabel(run.tags)} /></label>
+            <label className="label">Name<input className="field" data-focus="first" value={containerName} onChange={(event) => setContainerName(event.target.value)} /></label>
+            <label className="label">
+              Port
+              <input className="field" placeholder="8080:80" value={port} onBlur={() => setPortError(parsePort(port) === null ? "Use host:container, a single port, or leave this empty." : "")} onChange={(event) => setPort(event.target.value)} />
+              {portError ? <span className="field-error">{portError}</span> : null}
+            </label>
+            <div className="dialog-actions">
+              <button className="btn" type="button" onClick={() => setRun(null)}>Cancel</button>
+              <button className="btn primary" type="submit" disabled={pending === "run"}>{pending === "run" ? "Running…" : "Run"}</button>
+            </div>
+          </form>
         </Dialog>
       ) : null}
       {remove ? (
         <Dialog title={remove.length === 1 ? `Remove ${imageLabel(remove[0].tags)}?` : `Remove ${remove.length} images?`} onClose={() => setRemove(null)}>
-          <p>{remove.length === 1 ? `Remove image ${imageLabel(remove[0].tags)}? This deletes it from the local engine.` : `Remove ${remove.length} images? This deletes them from the local engine.`}</p>
+          <p>{remove.length === 1 ? `Remove image ${imageLabel(remove[0].tags)}? This deletes it from the local engine.` : `Remove ${listedNames(remove.map((item) => imageLabel(item.tags)))}? This deletes them from the local engine.`}</p>
           <div className="dialog-actions">
             <button className="btn" data-focus="first" type="button" onClick={() => setRemove(null)}>Cancel</button>
             <button className="btn danger" type="button" disabled={pending === "remove"} onClick={() => void removeImages()}>{pending === "remove" ? "Removing…" : "Remove"}</button>

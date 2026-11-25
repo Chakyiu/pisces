@@ -152,27 +152,29 @@ export function ContainerLogs({
 
   return (
     <section id={sectionId} className="widget">
-      <h2><span className="widget-title"><Icon name="logs" /> Log viewer settings</span></h2>
-      <div className="setting">
-        <span>Wrap lines</span>
-        <button className={wrap ? "switch on" : "switch"} type="button" role="switch" aria-checked={wrap} aria-label="Wrap lines" onClick={() => setWrap((value) => !value)}><i /></button>
-      </div>
-      <div className="setting">
-        <span>Display timestamps</span>
-        <button className={stamps ? "switch on" : "switch"} type="button" role="switch" aria-checked={stamps} aria-label="Display timestamps" onClick={() => setStamps((value) => !value)}><i /></button>
-      </div>
-      <label className="setting">
-        <span>Search</span>
-        <input className="field" placeholder="Filter..." value={q} onChange={(event) => setQ(event.target.value)} style={{ maxWidth: 280 }} />
-      </label>
-      <label className="setting">
-        <span>Lines</span>
-        <input className="field" type="number" min={1} max={200} value={tail} onChange={(event) => setTail(Number(event.target.value))} style={{ maxWidth: 120 }} />
-      </label>
-      <div className="setting">
-        <span>Follow</span>
-        <button className={follow ? "switch on" : "switch"} type="button" role="switch" aria-checked={follow} aria-label="Follow new log lines" onClick={() => setFollow((value) => !value)}><i /></button>
-      </div>
+      <h2><span className="widget-title"><Icon name="logs" /> Logs</span></h2>
+      <div className="log-bar">
+        <div className="setting">
+          <span>Wrap lines</span>
+          <button className={wrap ? "switch on" : "switch"} type="button" role="switch" aria-checked={wrap} aria-label="Wrap lines" onClick={() => setWrap((value) => !value)}><i /></button>
+        </div>
+        <div className="setting">
+          <span>Timestamps</span>
+          <button className={stamps ? "switch on" : "switch"} type="button" role="switch" aria-checked={stamps} aria-label="Display timestamps" onClick={() => setStamps((value) => !value)}><i /></button>
+        </div>
+        <label className="setting">
+          <span>Search</span>
+          <input className="field" placeholder="Filter..." value={q} onChange={(event) => setQ(event.target.value)} style={{ maxWidth: 220 }} />
+        </label>
+        <label className="setting">
+          <span>Lines</span>
+          <input className="field" type="number" min={1} max={200} value={tail} onChange={(event) => setTail(Number(event.target.value))} style={{ maxWidth: 88 }} aria-describedby="log-lines-max" />
+          <span id="log-lines-max" className="help">max 200</span>
+        </label>
+        <div className="setting">
+          <span>Follow</span>
+          <button className={follow ? "switch on" : "switch"} type="button" role="switch" aria-checked={follow} aria-label="Follow new log lines" onClick={() => setFollow((value) => !value)}><i /></button>
+        </div>
       {follow ? (
         <p className="note" role="status" style={{ margin: "0 16px 8px" }}>
           {followState === "error"
@@ -183,11 +185,12 @@ export function ContainerLogs({
         </p>
       ) : null}
       <div className="setting">
-        <span>Actions</span>
-        <span>
-          <button className="btn" type="button" onClick={() => void copy()}><Icon name="copy" /> Copy</button>
-          {copied ? <span className="note" style={{ marginLeft: 12 }}>{copied}</span> : null}
-        </span>
+          <span>Actions</span>
+          <span>
+            <button className="btn" type="button" onClick={() => void copy()}><Icon name="copy" /> Copy</button>
+            {copied ? <span className="note" style={{ marginLeft: 12 }}>{copied}</span> : null}
+          </span>
+        </div>
       </div>
       <div className={wrap ? "log-pane wrap" : "log-pane"}>
         {status === "loading" && !lines ? <p>Loading logs</p> : null}

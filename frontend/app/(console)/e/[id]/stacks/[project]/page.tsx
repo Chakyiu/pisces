@@ -14,6 +14,8 @@ import { ComposeEditor } from "../compose-editor";
 import { StackEnvEditor, stackEnvPayload } from "../stack-env-editor";
 import type { EnvValue } from "../../../../../../lib/types";
 import { ImagePullConfirmDialog } from "../../../../../../components/image-pull-confirm-dialog";
+import { unifiedDiff } from "../../../../../../lib/diff";
+import { changedEnvKeys, listedNames } from "../../../../../../lib/ux";
 
 const LOST_REQUEST = "The console lost the deploy request. Check the stack list before trying again. The engine may still be applying it.";
 const MAX_BYTES = 1_048_576;
@@ -64,6 +66,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmUpdate, setConfirmUpdate] = useState(false);
   const [confirmRestart, setConfirmRestart] = useState(false);
+  const [confirmLocalRestart, setConfirmLocalRestart] = useState(false);
   const [remove, setRemove] = useState(false);
   const [picked, setPicked] = useState<Record<string, Container>>({});
   const [offset, setOffset] = useState(0);
@@ -241,7 +244,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
       setConfirmRestart(true);
       return;
     }
-    void performStack("restart");
+    setConfirmLocalRestart(true);
   }
 
   async function deleteStack() {
@@ -356,7 +359,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
                       <td className="col-check"><label className="check"><input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.id])} onChange={() => setPicked((current) => { const next = { ...current }; if (next[item.id]) delete next[item.id]; else next[item.id] = item; return next; })} /></label></td>
                       <td className="name-cell"><Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link></td>
                       <td><Badge state={item.state} /></td>
-                      <td><Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}#container-logs`} aria-label="Logs" title="Logs"><Icon name="logs" /></Link></td>
+                      <td><Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}#container-logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}><Icon name="logs" /></Link></td>
                       <td className="mono name-cell" title={item.image}>{item.image}</td><td className="mono">{age(item.created)}</td><td className="mono">{portList(item.ports)}</td>
                     </tr>
                   ))}</tbody>
@@ -403,6 +406,15 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
           onConfirm={(repull) => void performStack("restart", repull)}
         />
       ) : null}
+      {confirmLocalRestart ? (
+        <Dialog title={`Restart stack ${project}?`} onClose={() => setConfirmLocalRestart(false)}>
+          <p>This restarts the containers already on {endpointName}. It does not pull images from a registry.</p>
+          <div className="dialog-actions">
+            <button className="btn" data-focus="first" type="button" onClick={() => setConfirmLocalRestart(false)}>Cancel</button>
+            <button className="btn primary" type="button" disabled={pending === "restart"} onClick={() => { setConfirmLocalRestart(false); void performStack("restart"); }}>Restart stack</button>
+          </div>
+        </Dialog>
+      ) : null}
       {confirmUpdate ? (
         <Dialog title={adopting ? (detail.origin === "discovered" ? `Replace ${project}?` : `Deploy ${project}?`) : `Update ${project}?`} onClose={() => setConfirmUpdate(false)}>
           <p>
@@ -410,6 +422,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
               ? `Pisces will store this Compose file and redeploy ${project} on ${endpointName}, replacing the containers found from labels. Services that this file no longer defines are removed. Named volumes stay.`
               : `Pisces will redeploy this Compose file on ${endpointName}. Services that this file no longer defines are removed. Named volumes stay.`}
           </p>
+          <StackUpdatePreview beforeCompose={detail.compose ?? ""} compose={compose} savedEnv={savedEnv} env={env} />
           <div className="dialog-actions"><button className="btn" data-focus="first" type="button" onClick={() => setConfirmUpdate(false)}>Cancel</button><button className="btn primary" type="button" disabled={pending === "update"} onClick={() => void updateStack()}>{pending === "update" ? (adopting ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : "Updating…") : adopting ? (detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack") : "Update the stack"}</button></div>
         </Dialog>
       ) : null}
@@ -425,7 +438,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
       ) : null}
       {remove ? (
         <Dialog title={selected.length === 1 ? `Remove ${selected[0].name}?` : `Remove ${selected.length} containers?`} onClose={() => setRemove(false)}>
-          <p>{selected.length === 1 ? `${selected[0].name} is ${selected[0].state}. Removing it deletes the writable layer. Named volumes stay on ${endpointName}.` : `Removing ${selected.length} containers deletes their writable layers. Named volumes stay on ${endpointName}.`}</p>
+          <p>{selected.length === 1 ? `${selected[0].name} is ${selected[0].state}. Removing it deletes the writable layer. Named volumes stay on ${endpointName}.` : `Removing ${listedNames(selected.map((item) => item.name))} deletes their writable layers. Named volumes stay on ${endpointName}.`}</p>
           <div className="dialog-actions"><button className="btn" data-focus="first" type="button" onClick={() => setRemove(false)}>Cancel</button><button className="btn danger" type="button" disabled={pending === "remove"} onClick={() => void perform("remove", selected)}>{pending === "remove" ? "Removing…" : "Remove"}</button></div>
         </Dialog>
       ) : null}
@@ -436,5 +449,38 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
         </Dialog>
       ) : null}
     </div>
+  );
+}
+
+function StackUpdatePreview({
+  beforeCompose,
+  compose,
+  savedEnv,
+  env,
+}: {
+  beforeCompose: string;
+  compose: string;
+  savedEnv: string;
+  env: EnvValue[];
+}) {
+  const diff = unifiedDiff(beforeCompose, compose);
+  let before: EnvValue[] = [];
+  try {
+    const parsed = JSON.parse(savedEnv) as EnvValue[];
+    if (Array.isArray(parsed)) before = parsed;
+  } catch {
+    before = [];
+  }
+  const keys = changedEnvKeys(before, stackEnvPayload(env));
+  return (
+    <>
+      <h3>Compose changes</h3>
+      <div className="diff" role="group" tabIndex={0} aria-label="Compose changes">
+        {diff.length === 0 ? <div className="ctx">No compose changes.</div> : diff.map((line, index) => (
+          <div key={index} className={line.kind}>{line.text}</div>
+        ))}
+      </div>
+      <p>{keys.length ? `Environment keys changed: ${keys.join(", ")}. Values stay hidden.` : "No environment keys changed."}</p>
+    </>
   );
 }
