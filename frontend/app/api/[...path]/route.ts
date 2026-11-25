@@ -47,7 +47,8 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   // a bound, because they are supposed to finish.
   const pathname = `/${path.join("/")}`;
   const stackApply = (req.method === "POST" && /\/stacks$/.test(pathname))
-    || ((req.method === "PUT" || req.method === "DELETE") && /\/stacks\/[^/]+$/.test(pathname));
+    || ((req.method === "PUT" || req.method === "DELETE") && /\/stacks\/[^/]+$/.test(pathname))
+    || (req.method === "POST" && /\/stacks\/[^/]+\/(start|stop|restart)$/.test(pathname));
   const slow = /\/(duplicate|recreate)$/.test(pathname);
 
   const init: RequestInit = {

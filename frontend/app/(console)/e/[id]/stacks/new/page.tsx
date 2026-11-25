@@ -140,7 +140,7 @@ export default function NewStackPage() {
           {nameErrorText ? <p id="stack-name-error" className="field-error" role="alert">{nameErrorText}</p> : null}
         </div>
         <p className="stack-note">This stack will be deployed using <a href="https://docs.docker.com/compose/" target="_blank" rel="noreferrer">Docker Compose</a>.</p>
-        <div className="stack-fact"><span>Build method</span><strong>Web editor</strong></div>
+        <div className="stack-fact"><span>Build method</span><strong>Compose YAML (web editor)</strong></div>
         <ComposeEditor
           value={compose}
           onChange={(value) => {

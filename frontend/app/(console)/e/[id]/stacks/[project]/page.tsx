@@ -194,6 +194,42 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
     }
   }
 
+  async function performStack(action: "start" | "stop" | "restart") {
+    setPending(action);
+    setAlert("");
+    const useCompose = detail?.origin === "managed" && detail.hasFile;
+    try {
+      if (useCompose) {
+        await api(`/api/endpoints/${id}/stacks/${encodeURIComponent(project)}/${action}`, {
+          method: "POST",
+          timeoutMs: 310_000,
+        });
+      } else {
+        const mapped = rows
+          .map((item) => containers.find((container) => container.id === item.id))
+          .filter((item): item is Container => Boolean(item));
+        const targets = action === "start"
+          ? mapped.filter((container) => !isUp(container))
+          : action === "stop"
+            ? mapped.filter(isUp)
+            : mapped;
+        for (const container of targets) {
+          await api(`/api/endpoints/${id}/containers/${encodeURIComponent(container.id)}/${action}`, {
+            method: "POST",
+          });
+        }
+      }
+      setPicked({});
+      await load();
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "The engine did not answer.";
+      if (err instanceof ApiError) publishApiError(err.code);
+      setAlert(`${action[0].toUpperCase()}${action.slice(1)} failed. ${message}`);
+    } finally {
+      setPending("");
+    }
+  }
+
   async function deleteStack() {
     const action = detail?.origin === "managed" ? "delete" : "remove";
     setPending(action);
@@ -264,9 +300,9 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
               <div className="widget-title"><Icon name="stacks" /> Stack actions</div>
               <div className="grow" />
               <div className="bulk">
-                <button className="btn" type="button" disabled={Boolean(pending) || !rowsStopped} onClick={() => void perform("start", rows.filter((item) => !isUp(item)).map((item) => containers.find((container) => container.id === item.id)).filter((item): item is Container => Boolean(item)))}>Start stack</button>
-                <button className="btn" type="button" disabled={Boolean(pending) || !rowsRunning} onClick={() => void perform("stop", rows.filter(isUp).map((item) => containers.find((container) => container.id === item.id)).filter((item): item is Container => Boolean(item)))}>Stop stack</button>
-                <button className="btn" type="button" disabled={Boolean(pending) || rows.length === 0} onClick={() => void perform("restart", rows.map((item) => containers.find((container) => container.id === item.id)).filter((item): item is Container => Boolean(item)))}>Restart stack</button>
+                <button className="btn" type="button" disabled={Boolean(pending) || !rowsStopped} onClick={() => void performStack("start")}>{pending === "start" ? "Starting…" : "Start stack"}</button>
+                <button className="btn" type="button" disabled={Boolean(pending) || !rowsRunning} onClick={() => void performStack("stop")}>{pending === "stop" ? "Stopping…" : "Stop stack"}</button>
+                <button className="btn" type="button" disabled={Boolean(pending) || rows.length === 0} onClick={() => void performStack("restart")}>{pending === "restart" ? "Restarting…" : "Restart stack"}</button>
                 <button className="btn danger" type="button" disabled={Boolean(pending)} aria-label={`${detail.origin === "managed" ? "Delete stack" : "Remove containers"} ${project}`} onClick={() => setConfirmDelete(true)}>
                   {pending === "delete" || pending === "remove" ? (detail.origin === "managed" ? "Deleting…" : "Removing…") : detail.origin === "managed" ? "Delete stack" : "Remove containers"}
                 </button>
