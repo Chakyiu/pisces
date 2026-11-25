@@ -457,19 +457,45 @@ function Fact({ label, value, mono, title }: { label: string; value: string; mon
 
 function MaskedEnvironment({ items }: { items: ContainerDetail["env"] }) {
   const [revealed, setRevealed] = useState<Record<number, boolean>>({});
+  const allRevealed = items.length > 0 && items.every((_, index) => revealed[index]);
+  const toggleAll = () => {
+    if (allRevealed) {
+      setRevealed({});
+      return;
+    }
+    setRevealed(Object.fromEntries(items.map((_, index) => [index, true])));
+  };
   return (
     <div className="fact fact-multiline">
       <span>Env</span>
-      <div className="env-list">
-        {items.length ? items.map(({ key, value }, index) => (
-          <div className="env-row" key={`${key}-${index}`}>
-            <code>{key}</code>
-            <code className="env-value">{revealed[index] ? value || "(empty)" : "••••••••"}</code>
-            <button className="btn" type="button" aria-label={`${revealed[index] ? "Hide" : "Reveal"} ${key}`} onClick={() => setRevealed((current) => ({ ...current, [index]: !current[index] }))}>
-              {revealed[index] ? "Hide" : "Reveal"}
-            </button>
-          </div>
-        )) : <strong>None</strong>}
+      <div className="env-block">
+        {items.length ? (
+          <>
+            <div className="env-bulk">
+              <button
+                className="btn"
+                type="button"
+                aria-label={allRevealed ? "Hide all environment" : "Reveal all environment"}
+                onClick={toggleAll}
+              >
+                {allRevealed ? "Hide all environment" : "Reveal all environment"}
+              </button>
+            </div>
+            <div className="env-list">
+              {items.map(({ key, value }, index) => (
+                <div className="env-row" key={`${key}-${index}`}>
+                  <code>{key}</code>
+                  <code className="env-value">{revealed[index] ? value || "(empty)" : "••••••••"}</code>
+                  <button className="btn" type="button" aria-label={`${revealed[index] ? "Hide" : "Reveal"} ${key}`} onClick={() => setRevealed((current) => ({ ...current, [index]: !current[index] }))}>
+                    {revealed[index] ? "Hide" : "Reveal"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : (
+          <strong>None</strong>
+        )}
       </div>
     </div>
   );
