@@ -647,6 +647,9 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 }
 .fact strong { font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .fact-multiline { align-items: start; }
+.env-block { display: grid; gap: 6px; min-width: 0; }
+.env-bulk { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto; gap: 8px; min-width: 0; }
+.env-bulk .btn { grid-column: 3; justify-self: end; padding: 4px 8px; white-space: nowrap; }
 .env-list { display: grid; gap: 6px; min-width: 0; }
 .env-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(120px, 2fr) auto; gap: 8px; align-items: center; min-width: 0; }
 .env-row code { overflow-wrap: anywhere; }
