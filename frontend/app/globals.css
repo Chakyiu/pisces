@@ -524,6 +524,8 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 .stack-tab { min-height: 40px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); }
 .stack-tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--text); }
 .stack-panel { display: grid; gap: 16px; min-width: 0; }
+/* Author `display` beats the UA `[hidden]` rule, which left every container view on the page. */
+.stack-panel[hidden] { display: none; }
 .stack-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .stack-fact { min-width: 0; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); display: grid; gap: 4px; }
 .stack-fact span { color: var(--text-muted); font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
@@ -743,6 +745,8 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
   border-radius: var(--radius);
   padding: 12px;
   min-height: 240px;
+  max-height: 70vh;
+  overflow: auto;
 }
 .log-line { font-family: var(--font-mono); white-space: pre; word-break: normal; margin: 0; }
 .log-pane.wrap .log-line { white-space: pre-wrap; word-break: break-word; }

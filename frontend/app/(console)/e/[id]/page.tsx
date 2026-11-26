@@ -124,7 +124,7 @@ function OverviewBody({ id, name }: { id: string; name: string }) {
                         <td className="mono name-cell" title={item.image}>{item.image}</td>
                         <td className="mono">{age(item.created)}</td>
                         <td>
-                          <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}#container-logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}>
+                          <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}>
                             <Icon name="logs" />
                           </Link>
                         </td>

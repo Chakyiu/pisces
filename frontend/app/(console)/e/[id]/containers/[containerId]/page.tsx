@@ -1,6 +1,6 @@
 "use client";
 
-import { type KeyboardEvent, useEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useLayoutEffect, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
@@ -74,19 +74,13 @@ function Body({
   const [editOpen, setEditOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
-  const [tab, setTab] = useState<ContainerTab>("inspect");
+  const [tab, setTab] = useState<ContainerTab>(() => tabFromQuery(searchParams.get("tab")) ?? "inspect");
 
   const detailPath = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
 
   function chooseTab(next: ContainerTab) {
     setTab(next);
-    if (next === "logs") {
-      router.replace(`${detailPath}#${CONTAINER_LOGS_SECTION_ID}`, { scroll: false });
-    } else if (next === "inspect") {
-      router.replace(detailPath, { scroll: false });
-    } else {
-      router.replace(`${detailPath}?tab=${next}`, { scroll: false });
-    }
+    router.replace(next === "inspect" ? detailPath : `${detailPath}?tab=${next}`, { scroll: false });
   }
 
   function tabKey(event: KeyboardEvent<HTMLDivElement>) {
@@ -102,30 +96,20 @@ function Body({
     document.getElementById(`container-tab-${next}`)?.focus();
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (status !== "ready") return;
-    const hashLogs = typeof window !== "undefined" && window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`;
-    const fromQuery = tabFromQuery(searchParams.get("tab"));
-    if (hashLogs) {
-      setTab("logs");
-      return;
-    }
-    if (fromQuery) {
-      setTab(fromQuery);
-      if (fromQuery === "logs") {
-        router.replace(`${detailPath}#${CONTAINER_LOGS_SECTION_ID}`, { scroll: false });
+    const apply = () => {
+      // Old log links used #container-logs. The logs view no longer uses that id, so the hash cannot scroll the page.
+      if (window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`) {
+        setTab("logs");
+        return;
       }
-    }
-  }, [status, searchParams, detailPath, router]);
-
-  useEffect(() => {
-    if (status !== "ready") return;
-    const onHash = () => {
-      if (window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`) setTab("logs");
+      setTab(tabFromQuery(searchParams.get("tab")) ?? "inspect");
     };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
-  }, [status]);
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
+  }, [status, searchParams]);
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -320,6 +304,7 @@ function Body({
             containerId={containerId}
             reload={reload}
             defaultFollow={isRunning}
+            sectionId="container-log-view"
           />
         ) : null}
       </section>
