@@ -1,6 +1,6 @@
 "use client";
 
-import { type KeyboardEvent, useEffect, useLayoutEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
@@ -75,10 +75,12 @@ function Body({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
   const [tab, setTab] = useState<ContainerTab>(() => tabFromQuery(searchParams.get("tab")) ?? "inspect");
+  const keptScroll = useRef<number | null>(null);
 
   const detailPath = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
 
   function chooseTab(next: ContainerTab) {
+    keptScroll.current = window.scrollY;
     setTab(next);
     router.replace(next === "inspect" ? detailPath : `${detailPath}?tab=${next}`, { scroll: false });
   }
@@ -95,6 +97,19 @@ function Body({
     chooseTab(next);
     document.getElementById(`container-tab-${next}`)?.focus();
   }
+
+  useLayoutEffect(() => {
+    const y = keptScroll.current;
+    if (y == null) return;
+    const urlTab = tabFromQuery(searchParams.get("tab")) ?? "inspect";
+    if (urlTab !== tab) return;
+    // Next still sets scrollTop to 0 on a search-param replace when scroll is false.
+    const frame = requestAnimationFrame(() => {
+      if (window.scrollY !== y) window.scrollTo(0, y);
+      keptScroll.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [tab, searchParams]);
 
   useLayoutEffect(() => {
     if (status !== "ready") return;
