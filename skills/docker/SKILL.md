@@ -27,10 +27,14 @@ The process is silent until a client writes a JSON-RPC message to stdin. Logs an
 Check the wiring without a full client:
 
 ```bash
-node --test skills/docker/server.test.mjs
+node --test skills/docker/server.test.mjs skills/mcp-audit.test.mjs
 ```
 
 That test uses a fake engine. It does not need a running daemon.
+
+## Audit log
+
+Every `tools/call` is appended to a JSONL audit log with the same fields, redaction, and retention as the Pisces AI server. See `skills/pisces/SKILL.md`. The default file for this server is `~/.pisces/mcp-audit/docker.jsonl` (`server` is `docker`). `PISCES_MCP_AUDIT_RETENTION_DAYS`, `PISCES_MCP_AUDIT_LOG`, and `PISCES_MCP_AUDIT_CONFIG` are shared. Tool results, including container env from inspect, are not copied into the log.
 
 ## Wire
 
