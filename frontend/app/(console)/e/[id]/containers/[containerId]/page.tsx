@@ -1,6 +1,6 @@
 "use client";
 
-import { type KeyboardEvent, useEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { blank, portList, stamp } from "../../../../../../lib/format";
@@ -74,19 +74,39 @@ function Body({
   const [editOpen, setEditOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
-  const [tab, setTab] = useState<ContainerTab>("inspect");
+  const [tab, setTab] = useState<ContainerTab>(() => tabFromQuery(searchParams.get("tab")) ?? "inspect");
+  const scrollHold = useRef<{ y: number; stageHeight: number } | null>(null);
 
   const detailPath = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
 
   function chooseTab(next: ContainerTab) {
+    const stage = document.querySelector(".tab-stage");
+    // Remember the stage box, not document scrollHeight. .main is min-height 100vh, so a short
+    // panel never shrinks the document below the viewport and a scrollHeight deficit under-counts.
+    scrollHold.current = {
+      y: window.scrollY,
+      stageHeight: stage instanceof HTMLElement ? stage.offsetHeight : 0,
+    };
     setTab(next);
-    if (next === "logs") {
-      router.replace(`${detailPath}#${CONTAINER_LOGS_SECTION_ID}`, { scroll: false });
-    } else if (next === "inspect") {
-      router.replace(detailPath, { scroll: false });
-    } else {
-      router.replace(`${detailPath}?tab=${next}`, { scroll: false });
+    // History.prototype skips Next's replaceState patch, which scrolls to the top on a search-param change.
+    const href = next === "inspect" ? detailPath : `${detailPath}?tab=${next}`;
+    History.prototype.replaceState.call(window.history, window.history.state, "", href);
+  }
+
+  useLayoutEffect(() => {
+    const hold = scrollHold.current;
+    if (!hold) return;
+    scrollHold.current = null;
+    const stage = document.querySelector(".tab-stage");
+    if (stage instanceof HTMLElement && hold.stageHeight > 0) {
+      stage.style.minHeight = "";
+      if (stage.offsetHeight < hold.stageHeight) stage.style.minHeight = `${hold.stageHeight}px`;
     }
+    if (window.scrollY !== hold.y) window.scrollTo(0, hold.y);
+  }, [tab]);
+
+  function focusTab(next: ContainerTab) {
+    document.getElementById(`container-tab-${next}`)?.focus({ preventScroll: true });
   }
 
   function tabKey(event: KeyboardEvent<HTMLDivElement>) {
@@ -99,32 +119,22 @@ function Body({
     else if (event.key === "ArrowLeft") next = CONTAINER_TABS[Math.max(0, index - 1)];
     else next = CONTAINER_TABS[Math.min(CONTAINER_TABS.length - 1, index + 1)];
     chooseTab(next);
-    document.getElementById(`container-tab-${next}`)?.focus();
+    focusTab(next);
   }
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (status !== "ready") return;
-    const hashLogs = typeof window !== "undefined" && window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`;
-    const fromQuery = tabFromQuery(searchParams.get("tab"));
-    if (hashLogs) {
-      setTab("logs");
-      return;
-    }
-    if (fromQuery) {
-      setTab(fromQuery);
-      if (fromQuery === "logs") {
-        router.replace(`${detailPath}#${CONTAINER_LOGS_SECTION_ID}`, { scroll: false });
+    const apply = () => {
+      // Old log links used #container-logs. That id is not on this page, so the hash cannot scroll it.
+      if (window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`) {
+        setTab("logs");
+        return;
       }
-    }
-  }, [status, searchParams, detailPath, router]);
-
-  useEffect(() => {
-    if (status !== "ready") return;
-    const onHash = () => {
-      if (window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`) setTab("logs");
+      setTab(tabFromQuery(new URLSearchParams(window.location.search).get("tab")) ?? "inspect");
     };
-    window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
+    apply();
+    window.addEventListener("hashchange", apply);
+    return () => window.removeEventListener("hashchange", apply);
   }, [status]);
 
   async function load(retry: boolean) {
@@ -252,7 +262,8 @@ function Body({
           </button>
         </div>
       </div>
-      <div className="stack-tabs" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
+      <div className="tab-stage">
+      <div className="stack-tabs pin" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
         {CONTAINER_TABS.map((key) => (
           <button
             key={key}
@@ -262,7 +273,11 @@ function Body({
             role="tab"
             aria-selected={tab === key}
             aria-controls={`container-panel-${key}`}
-            onClick={() => chooseTab(key)}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              chooseTab(key);
+              focusTab(key);
+            }}
           >
             {key === "logs" ? <><Icon name="logs" /> Logs</> : null}
             {key === "inspect" ? <><Icon name="eye" /> Inspect</> : null}
@@ -320,6 +335,7 @@ function Body({
             containerId={containerId}
             reload={reload}
             defaultFollow={isRunning}
+            sectionId="container-log-view"
           />
         ) : null}
       </section>
@@ -377,6 +393,7 @@ function Body({
           />
         ) : null}
       </section>
+      </div>
       {confirm ? (
         <Dialog title={`Remove ${detail.name}?`} onClose={() => setConfirm(false)}>
           <p>

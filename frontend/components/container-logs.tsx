@@ -134,7 +134,8 @@ export function ContainerLogs({
   }, [follow, endpointId, containerId, appliedTail, reload]);
 
   useEffect(() => {
-    if (follow) endRef.current?.scrollIntoView({ block: "nearest" });
+    const pane = endRef.current?.parentElement;
+    if (follow && pane) pane.scrollTop = pane.scrollHeight;
   }, [lines, follow]);
 
   const query = q.trim().toLowerCase();
