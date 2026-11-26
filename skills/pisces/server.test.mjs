@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs";
 import { createServer } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { openAudit } from "../mcp-audit.mjs";
 import {
   assertSegment,
   dispatch,
@@ -73,6 +76,73 @@ test("dispatch maps lifecycle calls to proposals", async () => {
   assert.match(calls[0].path, /\/start$/);
 });
 
+test("tools/call writes an audit record and list does not", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pisces-mcp-audit-"));
+  const logPath = path.join(dir, "pisces.jsonl");
+  const audit = openAudit(
+    {
+      PISCES_MCP_AUDIT_LOG: logPath,
+      PISCES_MCP_AUDIT_CONFIG: path.join(dir, "missing.json"),
+    },
+    "pisces",
+    ["pisces_agent_testsecret"],
+  );
+  try {
+    await handleRpc(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2024-11-05", clientInfo: { name: "tester", version: "1" } },
+      },
+      async () => ({}),
+      audit,
+    );
+    const ok = await handleRpc(
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "pisces_health", arguments: { endpointId: "local" } },
+      },
+      async () => ({ ok: true }),
+      audit,
+    );
+    assert.notEqual(ok.result.isError, true);
+    const bad = await handleRpc(
+      {
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "pisces_health", arguments: { token: "pisces_agent_testsecret" } },
+      },
+      async () => {
+        throw new Error("boom pisces_agent_testsecret");
+      },
+      audit,
+    );
+    assert.equal(bad.result.isError, true);
+    assert.match(bad.result.content[0].text, /testsecret/);
+    await handleRpc({ jsonrpc: "2.0", id: 4, method: "tools/list" }, async () => ({}), audit);
+    const rows = fs
+      .readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0].outcome, "ok");
+    assert.equal(rows[0].tool, "pisces_health");
+    assert.equal(rows[0].args.endpointId, "local");
+    assert.deepEqual(rows[0].client, { name: "tester", version: "1" });
+    assert.equal(rows[1].outcome, "error");
+    assert.equal(rows[1].args.token, "[REDACTED]");
+    assert.equal(rows[1].error, "boom [REDACTED]");
+    assert.equal(fs.readFileSync(logPath, "utf8").includes("testsecret"), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("stdio server talks to Pisces", async () => {
   const seen = [];
   function json(res, status, payload) {
@@ -100,7 +170,8 @@ test("stdio server talks to Pisces", async () => {
   await new Promise((resolve) => api.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${api.address().port}`;
 
-  const client = mcpClient(base);
+  const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "pisces-mcp-stdio-"));
+  const client = mcpClient(base, auditDir);
   try {
     const init = await client.request("initialize", {
       protocolVersion: "2024-11-05",
@@ -126,15 +197,19 @@ test("stdio server talks to Pisces", async () => {
   } finally {
     await client.stop();
     api.close();
+    fs.rmSync(auditDir, { recursive: true, force: true });
   }
 });
 
-function mcpClient(baseUrl) {
+function mcpClient(baseUrl, auditDir) {
   const child = spawn(process.execPath, [serverPath], {
     env: {
       ...process.env,
       PISCES_API_URL: baseUrl,
       PISCES_AGENT_CREDENTIAL: "pisces_agent_test",
+      PISCES_MCP_AUDIT_LOG: path.join(auditDir, "audit.jsonl"),
+      PISCES_MCP_AUDIT_CONFIG: path.join(auditDir, "missing.json"),
+      PISCES_MCP_AUDIT_RETENTION_DAYS: "30",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });

@@ -3,6 +3,7 @@
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { noteClient, openAudit, writeToolAudit } from "../mcp-audit.mjs";
 
 const DEFAULT_API = "1.41";
 const MAX_TEXT = 48 * 1024;
@@ -563,7 +564,7 @@ export async function dispatch(request, name, args = {}) {
   }
 }
 
-export async function handleRpc(message, request) {
+export async function handleRpc(message, request, audit = null) {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid request" } };
   }
@@ -574,6 +575,7 @@ export async function handleRpc(message, request) {
   }
   if (method.startsWith("notifications/")) return null;
   if (method === "initialize") {
+    noteClient(audit, params?.clientInfo);
     const requested = params?.protocolVersion;
     const protocolVersion = SUPPORTED_PROTOCOLS.includes(requested) ? requested : "2024-11-05";
     return {
@@ -596,19 +598,25 @@ export async function handleRpc(message, request) {
       params?.arguments && typeof params.arguments === "object" && !Array.isArray(params.arguments)
         ? params.arguments
         : {};
+    const startedAtMs = Date.now();
     if (typeof name !== "string" || !name) {
-      return toolError(id, "tools/call needs a tool name");
+      const message = "tools/call needs a tool name";
+      writeToolAudit(audit, { tool: "", args: toolArgs, startedAtMs, outcome: "error", error: message });
+      return toolError(id, message);
     }
     try {
       const value = await dispatch(request, name, toolArgs);
       const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      writeToolAudit(audit, { tool: name, args: toolArgs, startedAtMs, outcome: "ok", error: null });
       return {
         jsonrpc: "2.0",
         id,
         result: { content: [{ type: "text", text: clip(text) }] },
       };
     } catch (err) {
-      return toolError(id, err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      writeToolAudit(audit, { tool: name, args: toolArgs, startedAtMs, outcome: "error", error: message });
+      return toolError(id, message);
     }
   }
   if (id == null) return null;
@@ -767,7 +775,7 @@ function writeMessage(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-async function onLine(line, request) {
+async function onLine(line, request, audit) {
   let message;
   try {
     message = JSON.parse(line);
@@ -775,7 +783,7 @@ async function onLine(line, request) {
     writeMessage({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
     return;
   }
-  const response = await handleRpc(message, request);
+  const response = await handleRpc(message, request, audit);
   if (response) writeMessage(response);
 }
 
@@ -783,6 +791,7 @@ function main() {
   const endpoint = resolveEndpoint(process.env);
   const version = apiVersion(process.env);
   const request = (spec) => dockerRequest(endpoint, version, spec);
+  const audit = openAudit(process.env, "docker");
   let buffer = "";
   // shortcut: stdin lines are not size-capped; only a local MCP client should be attached.
   let chain = Promise.resolve();
@@ -795,7 +804,7 @@ function main() {
       const line = buffer.slice(0, nl).replace(/\r$/, "").trim();
       buffer = buffer.slice(nl + 1);
       if (!line) continue;
-      chain = chain.then(() => onLine(line, request)).catch((err) => {
+      chain = chain.then(() => onLine(line, request, audit)).catch((err) => {
         process.stderr.write(`docker-mcp: ${err.message}\n`);
       });
     }

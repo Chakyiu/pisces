@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import fs from "node:fs";
 import { createServer } from "node:http";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { openAudit } from "../mcp-audit.mjs";
 import {
   apiVersion,
   assertContainerRef,
@@ -137,6 +140,60 @@ test("run sends argv and does not split a command string", async () => {
   assert.equal(calls[1].path, "/containers/created123/start");
 });
 
+test("tools/call writes an audit record", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "docker-mcp-audit-"));
+  const logPath = path.join(dir, "docker.jsonl");
+  const audit = openAudit(
+    {
+      PISCES_MCP_AUDIT_LOG: logPath,
+      PISCES_MCP_AUDIT_CONFIG: path.join(dir, "missing.json"),
+    },
+    "docker",
+  );
+  try {
+    const ok = await handleRpc(
+      {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "docker_version", arguments: {} },
+      },
+      async () => ({ ApiVersion: "1.45" }),
+      audit,
+    );
+    assert.notEqual(ok.result.isError, true);
+    const bad = await handleRpc(
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "docker_container_start", arguments: { id: "missing" } },
+      },
+      async () => {
+        throw new Error("No such container");
+      },
+      audit,
+    );
+    assert.equal(bad.result.isError, true);
+    const rows = fs
+      .readFileSync(logPath, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(
+      rows.map((row) => ({ tool: row.tool, outcome: row.outcome })),
+      [
+        { tool: "docker_version", outcome: "ok" },
+        { tool: "docker_container_start", outcome: "error" },
+      ],
+    );
+    assert.equal(rows[1].args.id, "missing");
+    assert.equal(rows[1].error, "No such container");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("stdio server talks to the engine API", async () => {
   const seen = [];
   const engine = createServer(async (req, res) => {
@@ -193,7 +250,8 @@ test("stdio server talks to the engine API", async () => {
   });
   await new Promise((resolve) => engine.listen(0, "127.0.0.1", resolve));
   const port = engine.address().port;
-  const client = mcpClient(port);
+  const auditDir = fs.mkdtempSync(path.join(os.tmpdir(), "docker-mcp-stdio-"));
+  const client = mcpClient(port, auditDir);
   try {
     const init = await client.request("initialize", {
       protocolVersion: "2024-11-05",
@@ -238,6 +296,7 @@ test("stdio server talks to the engine API", async () => {
   } finally {
     await client.stop();
     engine.close();
+    fs.rmSync(auditDir, { recursive: true, force: true });
   }
   assert.ok(seen.some((call) => call.url.startsWith("/v1.41/containers/json")));
 });
@@ -255,13 +314,16 @@ async function tool(client, name, args) {
   return response.result.content[0].text;
 }
 
-function mcpClient(port) {
+function mcpClient(port, auditDir) {
   const child = spawn(process.execPath, [serverPath], {
     env: {
       ...process.env,
       DOCKER_HOST: `tcp://127.0.0.1:${port}`,
       DOCKER_API_VERSION: "1.41",
       DOCKER_TLS_VERIFY: "",
+      PISCES_MCP_AUDIT_LOG: path.join(auditDir, "audit.jsonl"),
+      PISCES_MCP_AUDIT_CONFIG: path.join(auditDir, "missing.json"),
+      PISCES_MCP_AUDIT_RETENTION_DAYS: "30",
     },
     stdio: ["pipe", "pipe", "pipe"],
   });
