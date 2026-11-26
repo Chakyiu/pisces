@@ -163,7 +163,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                   <th>Name</th>
                   <th>State</th>
                   <th>AI access</th>
-                  <th>Quick actions</th>
                   <th>Image</th>
                   <th>Created</th>
                   <th>Ports</th>
@@ -182,14 +181,6 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                     </td>
                     <td><Badge state={item.state} /></td>
                     <td><AiAccessBadge access={item.aiAccess} /></td>
-                    <td>
-                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}>
-                        <Icon name="logs" />
-                      </Link>
-                      <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=console`} aria-label={`Console ${item.name}`} title={`Console ${item.name}`}>
-                        <Icon name="console" />
-                      </Link>
-                    </td>
                     <td className="mono name-cell" title={item.image}>{item.image}</td>
                     <td className="mono">{age(item.created)}</td>
                     <td className="mono">{portList(item.ports)}</td>
