@@ -75,14 +75,38 @@ function Body({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
   const [tab, setTab] = useState<ContainerTab>(() => tabFromQuery(searchParams.get("tab")) ?? "inspect");
-  const keptScroll = useRef<number | null>(null);
+  const scrollHold = useRef<{ y: number; stageHeight: number } | null>(null);
 
   const detailPath = `/e/${endpointId}/containers/${encodeURIComponent(containerId)}`;
 
   function chooseTab(next: ContainerTab) {
-    keptScroll.current = window.scrollY;
+    const stage = document.querySelector(".tab-stage");
+    // Remember the stage box, not document scrollHeight. .main is min-height 100vh, so a short
+    // panel never shrinks the document below the viewport and a scrollHeight deficit under-counts.
+    scrollHold.current = {
+      y: window.scrollY,
+      stageHeight: stage instanceof HTMLElement ? stage.offsetHeight : 0,
+    };
     setTab(next);
-    router.replace(next === "inspect" ? detailPath : `${detailPath}?tab=${next}`, { scroll: false });
+    // History.prototype skips Next's replaceState patch, which scrolls to the top on a search-param change.
+    const href = next === "inspect" ? detailPath : `${detailPath}?tab=${next}`;
+    History.prototype.replaceState.call(window.history, window.history.state, "", href);
+  }
+
+  useLayoutEffect(() => {
+    const hold = scrollHold.current;
+    if (!hold) return;
+    scrollHold.current = null;
+    const stage = document.querySelector(".tab-stage");
+    if (stage instanceof HTMLElement && hold.stageHeight > 0) {
+      stage.style.minHeight = "";
+      if (stage.offsetHeight < hold.stageHeight) stage.style.minHeight = `${hold.stageHeight}px`;
+    }
+    if (window.scrollY !== hold.y) window.scrollTo(0, hold.y);
+  }, [tab]);
+
+  function focusTab(next: ContainerTab) {
+    document.getElementById(`container-tab-${next}`)?.focus({ preventScroll: true });
   }
 
   function tabKey(event: KeyboardEvent<HTMLDivElement>) {
@@ -95,36 +119,23 @@ function Body({
     else if (event.key === "ArrowLeft") next = CONTAINER_TABS[Math.max(0, index - 1)];
     else next = CONTAINER_TABS[Math.min(CONTAINER_TABS.length - 1, index + 1)];
     chooseTab(next);
-    document.getElementById(`container-tab-${next}`)?.focus();
+    focusTab(next);
   }
-
-  useLayoutEffect(() => {
-    const y = keptScroll.current;
-    if (y == null) return;
-    const urlTab = tabFromQuery(searchParams.get("tab")) ?? "inspect";
-    if (urlTab !== tab) return;
-    // Next still sets scrollTop to 0 on a search-param replace when scroll is false.
-    const frame = requestAnimationFrame(() => {
-      if (window.scrollY !== y) window.scrollTo(0, y);
-      keptScroll.current = null;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [tab, searchParams]);
 
   useLayoutEffect(() => {
     if (status !== "ready") return;
     const apply = () => {
-      // Old log links used #container-logs. The logs view no longer uses that id, so the hash cannot scroll the page.
+      // Old log links used #container-logs. That id is not on this page, so the hash cannot scroll it.
       if (window.location.hash === `#${CONTAINER_LOGS_SECTION_ID}`) {
         setTab("logs");
         return;
       }
-      setTab(tabFromQuery(searchParams.get("tab")) ?? "inspect");
+      setTab(tabFromQuery(new URLSearchParams(window.location.search).get("tab")) ?? "inspect");
     };
     apply();
     window.addEventListener("hashchange", apply);
     return () => window.removeEventListener("hashchange", apply);
-  }, [status, searchParams]);
+  }, [status]);
 
   async function load(retry: boolean) {
     if (retry) setAttempts((n) => n + 1);
@@ -251,7 +262,8 @@ function Body({
           </button>
         </div>
       </div>
-      <div className="stack-tabs" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
+      <div className="tab-stage">
+      <div className="stack-tabs pin" role="tablist" aria-label="Container views" onKeyDown={tabKey}>
         {CONTAINER_TABS.map((key) => (
           <button
             key={key}
@@ -261,7 +273,11 @@ function Body({
             role="tab"
             aria-selected={tab === key}
             aria-controls={`container-panel-${key}`}
-            onClick={() => chooseTab(key)}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => {
+              chooseTab(key);
+              focusTab(key);
+            }}
           >
             {key === "logs" ? <><Icon name="logs" /> Logs</> : null}
             {key === "inspect" ? <><Icon name="eye" /> Inspect</> : null}
@@ -377,6 +393,7 @@ function Body({
           />
         ) : null}
       </section>
+      </div>
       {confirm ? (
         <Dialog title={`Remove ${detail.name}?`} onClose={() => setConfirm(false)}>
           <p>

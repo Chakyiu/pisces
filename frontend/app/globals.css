@@ -521,6 +521,8 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 .compose-area:disabled { opacity: .7; }
 .compose-caption-row { display: flex; justify-content: space-between; gap: 12px; min-height: 18px; }
 .stack-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.tab-stage { display: grid; gap: 16px; min-width: 0; align-content: start; }
+.stack-tabs.pin { position: sticky; top: var(--header-h); z-index: 2; background: var(--canvas); }
 .stack-tab { min-height: 40px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-muted); }
 .stack-tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--text); }
 .stack-panel { display: grid; gap: 16px; min-width: 0; }
