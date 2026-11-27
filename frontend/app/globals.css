@@ -721,7 +721,6 @@ td { height: 44px; padding: 0 12px; border-bottom: 1px solid var(--border); vert
 }
 .command-bar .bulk { margin-left: auto; }
 .tag-more { display: block; color: var(--text-muted); font-size: 12px; }
-.stack-tab.soon { color: var(--text-muted); }
 .switch {
   width: 36px;
   height: 20px;
