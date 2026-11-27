@@ -4,7 +4,7 @@ const listenPort = Number(process.env.PORT ?? 3000);
 const nextPort = 3001;
 const backendPort = 8787;
 const headerLimit = 64 * 1024;
-const consolePath = /^\/api\/endpoints\/[A-Za-z0-9_.-]+\/containers\/[A-Za-z0-9_.:-]+\/console$/;
+const dockerSocketPath = /^\/api\/endpoints\/[A-Za-z0-9_.-]+\/containers\/[A-Za-z0-9_.:-]+\/(console|attach)$/;
 
 const server = net.createServer((client) => {
   let pending = Buffer.alloc(0);
@@ -49,7 +49,7 @@ const server = net.createServer((client) => {
       return;
     }
     const isWebSocket = headers.some((line) => /^upgrade:\s*websocket\s*$/i.test(line));
-    const upstreamPort = isWebSocket && consolePath.test(pathname) ? backendPort : nextPort;
+    const upstreamPort = isWebSocket && dockerSocketPath.test(pathname) ? backendPort : nextPort;
     const upstream = net.connect(upstreamPort, "127.0.0.1");
     let connected = false;
     client.pause();

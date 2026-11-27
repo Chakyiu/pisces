@@ -7,18 +7,20 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use bollard::auth::DockerCredentials;
-use bollard::container::LogOutput;
+use bollard::container::{AttachContainerResults, LogOutput};
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, ContainerInspectResponse, ContainerSummary, ContainerUpdateBody,
-    EndpointSettings, HostConfig, ImageSummary, Mount, MountType, Network, NetworkCreateRequest,
-    NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum, VolumeCreateRequest,
+    ContainerCreateBody, ContainerInspectResponse, ContainerStatsResponse, ContainerSummary,
+    ContainerUpdateBody, EndpointSettings, HostConfig, ImageSummary, Mount, MountType, Network,
+    NetworkCreateRequest, NetworkingConfig, PortBinding, RestartPolicy, RestartPolicyNameEnum,
+    VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, InspectContainerOptions,
-    ListContainersOptions, ListImagesOptions, ListNetworksOptions, ListVolumesOptions,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptions, RemoveVolumeOptions,
-    RenameContainerOptionsBuilder, StopContainerOptions,
+    AttachContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder,
+    InspectContainerOptions, ListContainersOptions, ListImagesOptions, ListNetworksOptions,
+    ListVolumesOptions, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptions,
+    RemoveVolumeOptions, RenameContainerOptionsBuilder, ResizeContainerTTYOptionsBuilder,
+    StatsOptionsBuilder, StopContainerOptions,
 };
 use bollard::Docker;
 use futures_util::{StreamExt, TryStreamExt};
@@ -481,6 +483,154 @@ pub async fn resize_console_exec(docker: &Docker, exec_id: &str, width: u16, hei
     let _ = tokio::time::timeout(Duration::from_secs(2), resize).await;
 }
 
+/// Live resource samples. Docker pushes about one record a second until the
+/// container stops or the caller drops the stream. Not wrapped in `TIMEOUT`.
+pub fn follow_stats(
+    id: &str,
+) -> Result<impl futures_util::Stream<Item = Result<ContainerStatsSample, ApiError>> + Send, ApiError>
+{
+    let docker = docker()?;
+    let options = StatsOptionsBuilder::new().stream(true).build();
+    let upstream = docker.stats(id, Some(options));
+    Ok(upstream.map(|item| match item {
+        Ok(stat) => Ok(stats_sample(&stat)),
+        Err(err) => Err(map_err(err)),
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerStatsSample {
+    pub cpu_percent: f64,
+    pub memory_bytes: u64,
+    pub memory_limit_bytes: u64,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+}
+
+/// Attach to the container's main process. This is not an exec'd shell.
+/// `logs` stays off: output starts at connect time, same as `docker attach`.
+pub async fn attach_container(
+    container_id: &str,
+) -> Result<(Docker, AttachContainerResults), ApiError> {
+    let docker = docker()?;
+    let options = AttachContainerOptionsBuilder::new()
+        .stdin(true)
+        .stdout(true)
+        .stderr(true)
+        .stream(true)
+        .logs(false)
+        .build();
+    let attached = timed(docker.attach_container(container_id, Some(options))).await?;
+    Ok((docker, attached))
+}
+
+pub async fn resize_container_tty(docker: &Docker, container_id: &str, width: u16, height: u16) {
+    if !(1..=500).contains(&width) || !(1..=500).contains(&height) {
+        return;
+    }
+    let options = ResizeContainerTTYOptionsBuilder::new()
+        .w(i32::from(width))
+        .h(i32::from(height))
+        .build();
+    let resize = docker.resize_container_tty(container_id, options);
+    let _ = tokio::time::timeout(Duration::from_secs(2), resize).await;
+}
+
+fn stats_sample(stat: &ContainerStatsResponse) -> ContainerStatsSample {
+    let (network_rx_bytes, network_tx_bytes) = network_bytes(stat);
+    ContainerStatsSample {
+        cpu_percent: cpu_percent(stat),
+        memory_bytes: memory_bytes(stat.memory_stats.as_ref()),
+        memory_limit_bytes: stat
+            .memory_stats
+            .as_ref()
+            .and_then(|memory| memory.limit)
+            .unwrap_or(0),
+        network_rx_bytes,
+        network_tx_bytes,
+    }
+}
+
+/// Linux cgroup formula used by the Docker CLI. The first sample often has an
+/// empty precpu reading, so the percent is 0 until the next one.
+/// shortcut: Windows containers omit system_cpu_usage and report 0% here, upgrade when a Windows engine is in scope.
+fn cpu_percent(stat: &ContainerStatsResponse) -> f64 {
+    let total = cpu_total(stat.cpu_stats.as_ref());
+    let previous = cpu_total(stat.precpu_stats.as_ref());
+    let cpu_delta = total.saturating_sub(previous) as f64;
+    let system = stat.cpu_stats.as_ref().and_then(|cpu| cpu.system_cpu_usage);
+    let previous_system = stat
+        .precpu_stats
+        .as_ref()
+        .and_then(|cpu| cpu.system_cpu_usage);
+    let (Some(system), Some(previous_system)) = (system, previous_system) else {
+        return 0.0;
+    };
+    let system_delta = system.saturating_sub(previous_system) as f64;
+    if system_delta <= 0.0 || cpu_delta <= 0.0 {
+        return 0.0;
+    }
+    let mut online = stat
+        .cpu_stats
+        .as_ref()
+        .and_then(|cpu| cpu.online_cpus)
+        .unwrap_or(0) as f64;
+    if online == 0.0 {
+        online = stat
+            .cpu_stats
+            .as_ref()
+            .and_then(|cpu| cpu.cpu_usage.as_ref())
+            .and_then(|usage| usage.percpu_usage.as_ref())
+            .map(|cores| cores.len() as f64)
+            .unwrap_or(0.0);
+    }
+    if online == 0.0 {
+        return 0.0;
+    }
+    (cpu_delta / system_delta) * online * 100.0
+}
+
+fn cpu_total(cpu: Option<&bollard::models::ContainerCpuStats>) -> u64 {
+    cpu.and_then(|cpu| cpu.cpu_usage.as_ref())
+        .and_then(|usage| usage.total_usage)
+        .unwrap_or(0)
+}
+
+/// Drop cache the way the Docker CLI does, so the figure matches `docker stats`.
+fn memory_bytes(memory: Option<&bollard::models::ContainerMemoryStats>) -> u64 {
+    let Some(memory) = memory else {
+        return 0;
+    };
+    if let Some(usage) = memory.usage {
+        let stats = memory.stats.as_ref();
+        if let Some(inactive) = stats.and_then(|stats| stats.get("total_inactive_file").copied()) {
+            if inactive < usage {
+                return usage - inactive;
+            }
+        }
+        if let Some(inactive) = stats.and_then(|stats| stats.get("inactive_file").copied()) {
+            if inactive < usage {
+                return usage - inactive;
+            }
+        }
+        return usage;
+    }
+    memory.privateworkingset.unwrap_or(0)
+}
+
+fn network_bytes(stat: &ContainerStatsResponse) -> (u64, u64) {
+    let Some(networks) = stat.networks.as_ref() else {
+        return (0, 0);
+    };
+    networks.values().fold((0, 0), |(rx, tx), iface| {
+        (
+            rx + iface.rx_bytes.unwrap_or(0),
+            tx + iface.tx_bytes.unwrap_or(0),
+        )
+    })
+}
+
 pub async fn logs(id: &str, tail: usize) -> Result<Vec<LogLine>, ApiError> {
     let docker = docker()?;
     let tail = tail.clamp(1, 200);
@@ -576,7 +726,7 @@ fn push_line(lines: &mut Vec<LogLine>, stream: &str, raw: &[u8]) {
 /// One NDJSON record. A mid-stream failure arrives as a final
 /// `{"error": true, "message": ...}` record because the response headers were
 /// already sent, so the status code can no longer carry it.
-pub fn encode_event(item: Result<LogLine, ApiError>) -> String {
+pub fn encode_event<T: Serialize>(item: Result<T, ApiError>) -> String {
     match item {
         Ok(line) => serde_json::to_string(&line).unwrap_or_else(|_| "{}".to_string()),
         Err(err) => serde_json::json!({ "error": true, "message": err.message }).to_string(),
@@ -2554,6 +2704,113 @@ mod tests {
         assert!(console_user(Some("0;id")).is_err());
     }
 
+    fn cpu(
+        total: u64,
+        system: Option<u64>,
+        online: Option<u32>,
+        percpu: Option<Vec<u64>>,
+    ) -> bollard::models::ContainerCpuStats {
+        bollard::models::ContainerCpuStats {
+            cpu_usage: Some(bollard::models::ContainerCpuUsage {
+                total_usage: Some(total),
+                percpu_usage: percpu,
+                ..Default::default()
+            }),
+            system_cpu_usage: system,
+            online_cpus: online,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stats_sample_matches_docker_cli_math() {
+        use bollard::models::{
+            ContainerMemoryStats, ContainerNetworkStats, ContainerStatsResponse,
+        };
+
+        let two_cores = ContainerStatsResponse {
+            cpu_stats: Some(cpu(200, Some(1_000), Some(2), None)),
+            precpu_stats: Some(cpu(100, Some(500), Some(2), None)),
+            ..Default::default()
+        };
+        let sample = stats_sample(&two_cores);
+        assert!((sample.cpu_percent - 40.0).abs() < 0.001);
+
+        let percpu = ContainerStatsResponse {
+            cpu_stats: Some(cpu(100, Some(100), Some(0), Some(vec![1, 1, 1, 1]))),
+            precpu_stats: Some(cpu(0, Some(0), Some(0), None)),
+            ..Default::default()
+        };
+        assert!((stats_sample(&percpu).cpu_percent - 400.0).abs() < 0.001);
+
+        let windows = ContainerStatsResponse {
+            cpu_stats: Some(cpu(100, None, None, None)),
+            precpu_stats: Some(cpu(0, None, None, None)),
+            ..Default::default()
+        };
+        assert_eq!(stats_sample(&windows).cpu_percent, 0.0);
+
+        let mut stats = HashMap::new();
+        stats.insert("total_inactive_file".to_string(), 100);
+        stats.insert("inactive_file".to_string(), 400);
+        let memory = ContainerStatsResponse {
+            memory_stats: Some(ContainerMemoryStats {
+                usage: Some(1_000),
+                limit: Some(4_000),
+                stats: Some(stats),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let sample = stats_sample(&memory);
+        assert_eq!(sample.memory_bytes, 900);
+        assert_eq!(sample.memory_limit_bytes, 4_000);
+
+        let cgroup2 = ContainerStatsResponse {
+            memory_stats: Some(ContainerMemoryStats {
+                usage: Some(1_000),
+                stats: Some(HashMap::from([("inactive_file".to_string(), 400)])),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(stats_sample(&cgroup2).memory_bytes, 600);
+
+        let windows_mem = ContainerStatsResponse {
+            memory_stats: Some(ContainerMemoryStats {
+                privateworkingset: Some(50),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(stats_sample(&windows_mem).memory_bytes, 50);
+
+        let networks = ContainerStatsResponse {
+            networks: Some(HashMap::from([
+                (
+                    "eth0".to_string(),
+                    ContainerNetworkStats {
+                        rx_bytes: Some(10),
+                        tx_bytes: Some(3),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "eth1".to_string(),
+                    ContainerNetworkStats {
+                        rx_bytes: Some(7),
+                        tx_bytes: Some(1),
+                        ..Default::default()
+                    },
+                ),
+            ])),
+            ..Default::default()
+        };
+        let sample = stats_sample(&networks);
+        assert_eq!(sample.network_rx_bytes, 17);
+        assert_eq!(sample.network_tx_bytes, 4);
+    }
+
     fn joined(lines: Vec<LogLine>) -> Vec<(String, String)> {
         lines
             .into_iter()
@@ -2629,7 +2886,7 @@ mod tests {
 
     #[test]
     fn error_travels_as_a_final_ndjson_record() {
-        let record = encode_event(Err(ApiError::daemon("engine went away")));
+        let record = encode_event::<LogLine>(Err(ApiError::daemon("engine went away")));
         let parsed: serde_json::Value = serde_json::from_str(&record).unwrap();
         assert_eq!(parsed["error"], serde_json::json!(true));
         assert_eq!(parsed["message"], serde_json::json!("engine went away"));

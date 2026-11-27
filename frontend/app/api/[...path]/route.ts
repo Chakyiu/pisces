@@ -37,10 +37,9 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   const host = req.headers.get("host");
   if (host) headers.set("x-forwarded-host", host);
 
-  // Following logs is a long-lived stream: it must outlive the 10 s abort every
-  // other call gets, or follow dies on a quiet container. The Rust side serves it
-  // with no collection timeout either.
-  const streaming = /\/logs\/stream$/.test(`/${path.join("/")}`);
+  // Log and stats follow are long-lived streams: they must outlive the 10 s abort
+  // every other call gets. The Rust side serves them with no collection timeout.
+  const streaming = /\/(logs|stats)\/stream$/.test(`/${path.join("/")}`);
 
   // Duplicate/Edit and Recreate stop a container inside the engine call, so
   // they need the same exemption from the 10 s abort as the log stream — with

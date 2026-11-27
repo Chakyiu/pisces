@@ -1584,6 +1584,7 @@ pub fn agent_route(method: &str, path: &str) -> RouteAccess {
         ("GET", ["endpoints", _, "containers", _, "config"]) => RouteAccess::Read,
         ("GET", ["endpoints", _, "containers", _, "logs"]) => RouteAccess::Read,
         ("GET", ["endpoints", _, "containers", _, "logs", "stream"]) => RouteAccess::Read,
+        ("GET", ["endpoints", _, "containers", _, "stats", "stream"]) => RouteAccess::Read,
         ("GET", ["endpoints", _, "stacks"]) => RouteAccess::Read,
         ("GET", ["endpoints", _, "stacks", _]) => RouteAccess::Read,
         ("GET", ["endpoints", _, "images"]) => RouteAccess::Read,
@@ -2542,6 +2543,11 @@ mod tests {
                 "/api/endpoints/e1/containers/c1/logs/stream",
                 RouteAccess::Read,
             ),
+            (
+                "GET",
+                "/api/endpoints/e1/containers/c1/stats/stream",
+                RouteAccess::Read,
+            ),
             ("GET", "/api/endpoints/e1/stacks", RouteAccess::Read),
             (
                 "POST",
@@ -2558,6 +2564,11 @@ mod tests {
             (
                 "GET",
                 "/api/endpoints/e1/containers/c1/console",
+                RouteAccess::Deny,
+            ),
+            (
+                "GET",
+                "/api/endpoints/e1/containers/c1/attach",
                 RouteAccess::Deny,
             ),
             (

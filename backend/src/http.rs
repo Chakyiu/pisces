@@ -351,8 +351,16 @@ pub fn router(state: AppState) -> Router {
             get(container_logs_stream),
         )
         .route(
+            "/api/endpoints/{id}/containers/{container_id}/stats/stream",
+            get(container_stats_stream),
+        )
+        .route(
             "/api/endpoints/{id}/containers/{container_id}/console",
             get(container_console),
+        )
+        .route(
+            "/api/endpoints/{id}/containers/{container_id}/attach",
+            get(container_attach),
         )
         .route(
             "/api/endpoints/{id}/containers/{container_id}/start",
@@ -1587,14 +1595,8 @@ async fn apply_stack_create(
     )?;
     let candidate = dir.join("compose.yaml.new");
     let env_file = stack_env_for_apply(&dir);
-    if let Err(error) = stacks::up(
-        &body.project,
-        &dir,
-        &candidate,
-        env_file.as_deref(),
-        false,
-    )
-    .await
+    if let Err(error) =
+        stacks::up(&body.project, &dir, &candidate, env_file.as_deref(), false).await
     {
         lock(state).keep_failed_create(&endpoint.id, &body.project, &error.message);
         return Err(error);
@@ -1769,8 +1771,7 @@ async fn apply_stack_update(
         }
         let candidate = dir.join("compose.yaml.new");
         let env_file = stack_env_for_apply(&dir);
-        if let Err(error) = stacks::up(&project, &dir, &candidate, env_file.as_deref(), false)
-            .await
+        if let Err(error) = stacks::up(&project, &dir, &candidate, env_file.as_deref(), false).await
         {
             lock(state).keep_failed_create(&endpoint.id, &project, &error.message);
             return Err(error);
@@ -1824,9 +1825,7 @@ async fn stack_compose_lifecycle(
 ) -> Result<(), ApiError> {
     stacks::validate_project_name(project)?;
     let _apply = state.stack_apply.lock(&endpoint.id, project).await;
-    let has_file = lock(state)
-        .stack_file(&endpoint.id, project)
-        .is_some();
+    let has_file = lock(state).stack_file(&endpoint.id, project).is_some();
     if !has_file {
         return Err(ApiError::validation(
             "Pisces does not have a Compose file for this stack, so Compose cannot run the whole stack. Restart the containers instead.",
@@ -2024,6 +2023,32 @@ async fn container_logs_stream(
         .map_err(|_| ApiError::daemon("The log stream could not be opened."))
 }
 
+/// NDJSON stats follow. Same proxy exemption as logs: a quiet container still
+/// sends a sample about once a second, and the stream stays open until it stops.
+async fn container_stats_stream(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Path((id, container_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let endpoint = require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?;
+    if principal.is_agent() {
+        let value = container_access(&state, &endpoint.id, container_id).await?;
+        require_access_read(&value)?;
+    }
+    let samples = docker::follow_stats(container_id)?;
+    let body = Body::from_stream(
+        samples.map(|item| Ok::<_, std::io::Error>(format!("{}\n", docker::encode_event(item)))),
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-accel-buffering", "no")
+        .body(body)
+        .map_err(|_| ApiError::daemon("The stats stream could not be opened."))
+}
+
 async fn container_console(
     State(state): State<AppState>,
     Path((id, container_id)): Path<(String, String)>,
@@ -2044,6 +2069,25 @@ async fn container_console(
         .max_message_size(64 * 1024)
         .max_frame_size(64 * 1024)
         .on_upgrade(move |socket| console_socket(socket, container_id, command, user)))
+}
+
+async fn container_attach(
+    State(state): State<AppState>,
+    Path((id, container_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    require_docker(&state, &id)?;
+    let container_id = docker::object_ref(&container_id)?.to_string();
+    if !websocket_same_origin(&headers) {
+        return Err(ApiError::unauthorized(
+            "Cross-origin WebSocket request rejected.",
+        ));
+    }
+    Ok(ws
+        .max_message_size(64 * 1024)
+        .max_frame_size(64 * 1024)
+        .on_upgrade(move |socket| attach_socket(socket, container_id)))
 }
 
 fn websocket_same_origin(headers: &HeaderMap) -> bool {
@@ -2155,6 +2199,73 @@ async fn console_socket(
     // Closing both halves also releases the Docker hijacked connection.
     let _ = tokio::time::timeout(Duration::from_secs(1), input.write_all(b"\x03\x04")).await;
     let _ = tokio::time::timeout(Duration::from_secs(1), input.flush()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), input.shutdown()).await;
+    if disconnected {
+        let _ = tokio::time::timeout(Duration::from_secs(2), async {
+            while output.next().await.is_some() {}
+        })
+        .await;
+    }
+    let _ = socket.close().await;
+}
+
+async fn attach_socket(mut socket: WebSocket, container_id: String) {
+    let (docker, attached) = match docker::attach_container(&container_id).await {
+        Ok(attached) => attached,
+        Err(_) => {
+            send_console_error(
+                &mut socket,
+                "Could not attach. Confirm the container is running.".into(),
+            )
+            .await;
+            return;
+        }
+    };
+    let mut output = attached.output;
+    let mut input = attached.input;
+
+    let mut disconnected = false;
+    loop {
+        tokio::select! {
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(message) = serde_json::from_str::<ConsoleMessage>(&text) {
+                        match message {
+                            ConsoleMessage::Input { data } if data.len() <= 32 * 1024 => {
+                                if input.write_all(data.as_bytes()).await.is_err() { break; }
+                                let _ = input.flush().await;
+                            }
+                            ConsoleMessage::Resize { width, height }
+                                if (1..=500).contains(&width) && (1..=500).contains(&height) => {
+                                docker::resize_container_tty(&docker, &container_id, width, height).await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Some(Ok(Message::Ping(data))) => {
+                    if socket.send(Message::Pong(data)).await.is_err() { break; }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                    disconnected = true;
+                    break;
+                }
+                _ => {}
+            },
+            outgoing = output.next() => match outgoing {
+                Some(Ok(bollard::container::LogOutput::StdIn { .. })) => {}
+                Some(Ok(line)) => {
+                    if socket.send(Message::Binary(line.into_bytes())).await.is_err() {
+                        disconnected = true;
+                        break;
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+    }
+
+    // Detach only. Ctrl-C would signal the main process; closing the hijack does not.
     let _ = tokio::time::timeout(Duration::from_secs(1), input.shutdown()).await;
     if disconnected {
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
@@ -2994,6 +3105,7 @@ mod console_tests {
             ports: None,
             mounts: None,
             restart_policy: None,
+            repull: false,
         };
         assert!(reject_agent_duplicate_values(&bare).is_ok());
         for body in [

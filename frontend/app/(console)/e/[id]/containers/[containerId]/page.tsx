@@ -8,6 +8,7 @@ import type { ContainerDetail } from "../../../../../../lib/types";
 import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
 import { ContainerAiAccess } from "../../../../../../components/container-ai-access";
 import { ContainerConsole } from "../../../../../../components/container-console";
+import { ContainerStats } from "../../../../../../components/container-stats";
 import { CONTAINER_LOGS_SECTION_ID, ContainerLogs } from "../../../../../../components/container-logs";
 import { ContainerDuplicateDialog } from "../../../../../../components/container-duplicate-dialog";
 import { ContainerSettingsDialog } from "../../../../../../components/container-settings-dialog";
@@ -268,7 +269,7 @@ function Body({
           <button
             key={key}
             id={`container-tab-${key}`}
-            className={`stack-tab${key === "stats" || key === "attach" ? " soon" : ""}`}
+            className="stack-tab"
             type="button"
             role="tab"
             aria-selected={tab === key}
@@ -281,9 +282,9 @@ function Body({
           >
             {key === "logs" ? <><Icon name="logs" /> Logs</> : null}
             {key === "inspect" ? <><Icon name="eye" /> Inspect</> : null}
-            {key === "stats" ? <>Stats <span className="nav-soon">soon</span></> : null}
+            {key === "stats" ? "Stats" : null}
             {key === "console" ? <><Icon name="console" /> Console</> : null}
-            {key === "attach" ? <>Attach <span className="nav-soon">soon</span></> : null}
+            {key === "attach" ? "Attach" : null}
           </button>
         ))}
       </div>
@@ -347,10 +348,17 @@ function Body({
         hidden={tab !== "stats"}
       >
         {tab === "stats" ? (
-          <ContainerViewSoon
-            title="Container stats are not available yet"
-            body="Live CPU, memory, and network charts for this container are not in this Pisces build. Use Inspect for container metadata or Logs for output."
-          />
+          isRunning ? (
+            <ContainerStats endpointId={endpointId} containerId={containerId} />
+          ) : (
+            <div className="state">
+              <h2>Stats needs a running container</h2>
+              <p>{detail.name} is {detail.state}. Start it, then open Stats again.</p>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("start")}>
+                <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+              </button>
+            </div>
+          )
         ) : null}
       </section>
       <section
@@ -387,10 +395,23 @@ function Body({
         hidden={tab !== "attach"}
       >
         {tab === "attach" ? (
-          <ContainerViewSoon
-            title="Attach is not available yet"
-            body="Streaming attach to a running process stdin is not in this Pisces build. Use Console for an interactive shell when the container is running."
-          />
+          isRunning ? (
+            <ContainerConsole
+              kind="attach"
+              endpointId={endpointId}
+              containerId={containerId}
+              running={isRunning}
+              onClose={() => chooseTab("inspect")}
+            />
+          ) : (
+            <div className="state">
+              <h2>Attach needs a running container</h2>
+              <p>{detail.name} is {detail.state}. Start it, then open Attach again.</p>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("start")}>
+                <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+              </button>
+            </div>
+          )
         ) : null}
       </section>
       </div>
@@ -450,16 +471,6 @@ function Body({
           }}
         />
       ) : null}
-    </div>
-  );
-}
-
-function ContainerViewSoon({ title, body }: { title: string; body: string }) {
-  return (
-    <div className="state placeholder-panel">
-      <span className="badge warn"><i className="sq warn" />not in this build</span>
-      <h2>{title}</h2>
-      <p>{body}</p>
     </div>
   );
 }

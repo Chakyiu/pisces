@@ -14,12 +14,15 @@ export function ContainerConsole({
   containerId,
   running,
   onClose,
+  kind = "console",
 }: {
   endpointId: string;
   containerId: string;
   running: boolean;
   onClose: () => void;
+  kind?: "console" | "attach";
 }) {
+  const attach = kind === "attach";
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminal = useRef<Terminal | null>(null);
   const fitAddon = useRef<FitAddon | null>(null);
@@ -45,9 +48,13 @@ export function ContainerConsole({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
-    term.element?.setAttribute("aria-label", "Container terminal");
+    term.element?.setAttribute("aria-label", attach ? "Container attach" : "Container terminal");
     fit.fit();
-    term.writeln("Select a shell and connect to start a session.");
+    term.writeln(
+      attach
+        ? "Connect to attach to the container's main process. This is not a new shell."
+        : "Select a shell and connect to start a session.",
+    );
     terminal.current = term;
     fitAddon.current = fit;
 
@@ -80,7 +87,7 @@ export function ContainerConsole({
       terminal.current = null;
       fitAddon.current = null;
     };
-  }, []);
+  }, [attach]);
 
   useEffect(() => {
     if (!connection || !running) return;
@@ -90,11 +97,17 @@ export function ContainerConsole({
 
     setStatus("connecting");
     setError("");
-    term.writeln(`\r\nConnecting to ${connection.shell === "sh" ? "/bin/sh" : `/bin/${connection.shell}`}…`);
+    term.writeln(
+      attach
+        ? "\r\nAttaching to the main process…"
+        : `\r\nConnecting to ${connection.shell === "sh" ? "/bin/sh" : `/bin/${connection.shell}`}…`,
+    );
 
     const query = new URLSearchParams({ shell: connection.shell, user: connection.user });
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const path = `/api/endpoints/${encodeURIComponent(endpointId)}/containers/${encodeURIComponent(containerId)}/console?${query}`;
+    const path = attach
+      ? `/api/endpoints/${encodeURIComponent(endpointId)}/containers/${encodeURIComponent(containerId)}/attach`
+      : `/api/endpoints/${encodeURIComponent(endpointId)}/containers/${encodeURIComponent(containerId)}/console?${query}`;
     const current = new WebSocket(`${scheme}//${window.location.host}${path}`);
     current.binaryType = "arraybuffer";
     socket.current = current;
@@ -123,7 +136,11 @@ export function ContainerConsole({
     current.onerror = () => {
       if (!serverFailure) {
         connectionFailure = true;
-        setError("The console connection failed. Check your session and container, then try again.");
+        setError(
+          attach
+            ? "The attach connection failed. Check your session and container, then try again."
+            : "The console connection failed. Check your session and container, then try again.",
+        );
         setStatus("error");
       }
     };
@@ -131,7 +148,7 @@ export function ContainerConsole({
       if (socket.current === current) socket.current = null;
       if (serverFailure || connectionFailure) return;
       setStatus("disconnected");
-      term.writeln("\r\n[Console disconnected]");
+      term.writeln(attach ? "\r\n[Attach disconnected]" : "\r\n[Console disconnected]");
     };
 
     return () => {
@@ -142,7 +159,7 @@ export function ContainerConsole({
       if (socket.current === current) socket.current = null;
       if (current.readyState < WebSocket.CLOSING) current.close(1000, "Console closed");
     };
-  }, [connection, endpointId, containerId, running]);
+  }, [attach, connection, endpointId, containerId, running]);
 
   useEffect(() => {
     if (running) return;
@@ -167,40 +184,45 @@ export function ContainerConsole({
   }
 
   return (
-    <section className="widget console-widget" id="container-console" aria-label="Container console">
+    <section className="widget console-widget" id={attach ? "container-attach" : "container-console"} aria-label={attach ? "Container attach" : "Container console"}>
       <div className="widget-head">
-        <h2 className="widget-title"><Icon name="console" /> Console</h2>
+        <h2 className="widget-title"><Icon name="console" /> {attach ? "Attach" : "Console"}</h2>
         <div className="console-controls">
-          <label className="console-choice">
-            <span>Shell</span>
-            <select className="select" value={shell} disabled={status === "connecting" || status === "connected" || status === "disconnecting"} onChange={(event) => setShell(event.target.value)}>
-              <option value="sh">/bin/sh</option>
-              <option value="bash">/bin/bash</option>
-              <option value="ash">/bin/ash</option>
-            </select>
-          </label>
-          <label className="console-choice">
-            <span>User</span>
-            <select className="select" value={user} disabled={status === "connecting" || status === "connected" || status === "disconnecting"} onChange={(event) => setUser(event.target.value)}>
-              <option value="default">Container default</option>
-              <option value="root">root</option>
-            </select>
-          </label>
+          {attach ? null : (
+            <>
+              <label className="console-choice">
+                <span>Shell</span>
+                <select className="select" value={shell} disabled={status === "connecting" || status === "connected" || status === "disconnecting"} onChange={(event) => setShell(event.target.value)}>
+                  <option value="sh">/bin/sh</option>
+                  <option value="bash">/bin/bash</option>
+                  <option value="ash">/bin/ash</option>
+                </select>
+              </label>
+              <label className="console-choice">
+                <span>User</span>
+                <select className="select" value={user} disabled={status === "connecting" || status === "connected" || status === "disconnecting"} onChange={(event) => setUser(event.target.value)}>
+                  <option value="default">Container default</option>
+                  <option value="root">root</option>
+                </select>
+              </label>
+            </>
+          )}
           {status === "connected" || status === "connecting" || status === "disconnecting" ? (
-            <button className="btn danger" type="button" title="Disconnect console" disabled={status === "disconnecting"} onClick={disconnect}>
+            <button className="btn danger" type="button" title={attach ? "Disconnect attach" : "Disconnect console"} disabled={status === "disconnecting"} onClick={disconnect}>
               <Icon name="stop" /> {status === "connecting" ? "Cancel" : status === "disconnecting" ? "Disconnecting…" : "Disconnect"}
             </button>
           ) : (
-            <button className="btn primary" type="button" title="Connect console" disabled={!running} onClick={connect}>
+            <button className="btn primary" type="button" title={attach ? "Attach to the main process" : "Connect console"} disabled={!running} onClick={connect}>
               <Icon name="play" /> Connect
             </button>
           )}
-          <button className="btn" type="button" title="Close console" onClick={onClose}>Close</button>
+          <button className="btn" type="button" title={attach ? "Close attach" : "Close console"} onClick={onClose}>Close</button>
         </div>
       </div>
-      {user === "root" ? <p className="note" role="status">Running shell as root</p> : null}
+      {attach ? <p className="note" role="status" style={{ margin: "8px 16px" }}>Keystrokes go to the main process. Disconnect detaches and leaves the container running. Earlier output stays on Logs.</p> : null}
+      {!attach && user === "root" ? <p className="note" role="status">Running shell as root</p> : null}
       <div className="console-status" role={error ? "alert" : "status"} aria-live="polite">
-        {error || (status === "connected" ? "Connected" : status === "connecting" ? "Connecting…" : status === "disconnecting" ? "Disconnecting…" : running ? "Disconnected" : "Start the container to use the console.")}
+        {error || (status === "connected" ? "Connected" : status === "connecting" ? "Connecting…" : status === "disconnecting" ? "Disconnecting…" : running ? "Disconnected" : attach ? "Start the container to attach." : "Start the container to use the console.")}
       </div>
       <div className="console-terminal" ref={terminalHost} />
     </section>
