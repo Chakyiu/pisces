@@ -75,6 +75,12 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   for (const setCookie of upstream.headers.getSetCookie?.() ?? []) {
     out.append("set-cookie", setCookie);
   }
+  // 204/205/304 cannot carry a body. Forwarding a non-null stream throws, and
+  // the browser never finishes the request — stack Update stays on "Updating…".
+  if (upstream.status === 204 || upstream.status === 205 || upstream.status === 304) {
+    await upstream.body?.cancel().catch(() => undefined);
+    return new Response(null, { status: upstream.status, headers: out });
+  }
   return new Response(upstream.body, { status: upstream.status, headers: out });
 }
 
