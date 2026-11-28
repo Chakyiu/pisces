@@ -6,7 +6,7 @@ import { ApiError, api } from "../../../../../lib/api";
 import { age, bytes, imageLabel, shortId } from "../../../../../lib/format";
 import type { ImageItem, Page } from "../../../../../lib/types";
 import { listedNames, parsePort } from "../../../../../lib/ux";
-import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { Dialog, Empty, ErrorState, Icon, Loading, SelectionBar } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
 
@@ -173,9 +173,11 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
         <div className="widget-head">
           <input className="field search" placeholder="tag or id" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
-          <button className="btn danger" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => setRemove(selected)}>
-            <Icon name="trash" /> Remove
-          </button>
+          <SelectionBar count={selected.length} onClear={() => setPicked({})}>
+            <button className="btn danger" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => setRemove(selected)}>
+              <Icon name="trash" /> Remove
+            </button>
+          </SelectionBar>
         </div>
         {status === "loading" && !page ? <Loading noun="images" /> : null}
         {status === "error" ? (
@@ -209,14 +211,14 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <input type="checkbox" aria-label={`Select ${imageLabel(item.tags)}`} checked={Boolean(picked[item.id])} onChange={() => toggle(item)} />
                       </label>
                     </td>
-                    <td className="mono name-cell" title={item.tags.join(", ") || item.id}>
+                    <td className="mono name-cell cell-name" title={item.tags.join(", ") || item.id}>
                       {imageLabel(item.tags)}
                       {extraTags(item.tags).length ? <span className="tag-more">{extraTags(item.tags).join(", ")}</span> : null}
                     </td>
-                    <td className="mono" title={item.id}>{shortId(item.id)}</td>
-                    <td className="mono">{bytes(item.sizeBytes)}</td>
-                    <td className="mono">{age(item.created)}</td>
-                    <td>
+                    <td className="mono cell-secondary" title={item.id}>{shortId(item.id)}</td>
+                    <td className="mono cell-meta">{bytes(item.sizeBytes)}</td>
+                    <td className="mono cell-meta">{age(item.created)}</td>
+                    <td className="cell-action">
                       <button className="btn" type="button" onClick={() => { setRun(item); setContainerName(""); setPort(""); setPortError(""); }}>
                         <Icon name="play" /> Run
                       </button>

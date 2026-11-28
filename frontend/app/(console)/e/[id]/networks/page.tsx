@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, api } from "../../../../../lib/api";
 import type { Network } from "../../../../../lib/types";
 import { listedNames } from "../../../../../lib/ux";
-import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { Dialog, Empty, ErrorState, Icon, Loading, SelectionBar } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
 
@@ -101,9 +101,11 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
           <button className="btn primary" type="button" onClick={() => { setNetworkName(""); setNameError(""); setDriver("bridge"); setCreate(true); }}>
             <Icon name="plus" /> Create network
           </button>
-          <button className="btn danger" type="button" disabled={pending || selected.length === 0} onClick={() => setRemove(selected)}>
-            <Icon name="trash" /> Remove
-          </button>
+          <SelectionBar count={selected.length} onClear={() => setPicked({})}>
+            <button className="btn danger" type="button" disabled={pending || selected.length === 0} onClick={() => setRemove(selected)}>
+              <Icon name="trash" /> Remove
+            </button>
+          </SelectionBar>
         </div>
         <p className="help" style={{ padding: "0 16px 8px" }}>Built-in networks such as bridge, host, and none cannot be removed, so Select all leaves them out.</p>
         {query.status === "loading" && !query.data ? <Loading noun="networks" /> : null}
@@ -137,11 +139,11 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         />
                       </label>
                     </td>
-                    <td>{item.name}</td>
-                    <td className="mono">{item.driver}</td>
-                    <td>{item.scope || "—"}</td>
-                    <td className="mono">{item.subnet || "—"}</td>
-                    <td className="mono">{item.containerCount}</td>
+                    <td className="cell-name">{item.name}</td>
+                    <td className="mono cell-secondary">{item.driver}</td>
+                    <td className="cell-meta">{item.scope || "—"}</td>
+                    <td className="mono cell-meta">{item.subnet || "—"}</td>
+                    <td className="mono cell-meta">{item.containerCount}</td>
                   </tr>
                 ))}
               </tbody>
