@@ -79,6 +79,7 @@ export function Loading({ noun }: { noun: string }) {
       <div className="skel" />
       <div className="skel" />
       <div className="skel" />
+      <div className="skel skel-extra" />
       <p className="note" role="status">Loading {noun}</p>
     </div>
   );
@@ -107,6 +108,26 @@ export function ErrorState({
       {attempts > 0 && at ? (
         <p className="note">Last attempted: {clock(at)} · {attempts} {attempts === 1 ? "retry" : "retries"}</p>
       ) : null}
+    </div>
+  );
+}
+
+export function SelectionBar({
+  count,
+  onClear,
+  children,
+}: {
+  count: number;
+  onClear: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div className={count > 0 ? "selection-slot is-selected" : "selection-slot"}>
+      <div className="selection-meta">
+        <span className="note">{count} selected</span>
+        <button className="btn selection-clear" type="button" onClick={onClear}>Clear</button>
+      </div>
+      <div className="bulk">{children}</div>
     </div>
   );
 }

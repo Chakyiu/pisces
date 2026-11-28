@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { ApiError, api } from "../../../../../lib/api";
 import type { Stack, StackContainer } from "../../../../../lib/types";
-import { Badge, Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { Badge, Dialog, Empty, ErrorState, Icon, Loading, SelectionBar } from "../../../../../components/bits";
 import { ImagePullConfirmDialog } from "../../../../../components/image-pull-confirm-dialog";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
@@ -140,7 +140,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
         <div className="widget-head">
           <input className="field search" placeholder="project name" value={q} onChange={(event) => setQ(event.target.value)} />
           <div className="grow" />
-          <div className="bulk">
+          <SelectionBar count={selected.length} onClear={() => setPicked({})}>
             <button className="btn" type="button" disabled={disabled || !canStart} onClick={() => void act("start")}>
               <Icon name="play" /> {label("start", "Starting…", "Start")}
             </button>
@@ -153,7 +153,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <button className="btn danger" type="button" disabled={disabled || selected.length === 0} onClick={() => setRemove(selected)}>
               <Icon name="trash" /> Delete
             </button>
-          </div>
+          </SelectionBar>
         </div>
         {query.status === "loading" && !query.data ? <Loading noun="stacks" /> : null}
         {query.status === "error" ? (
@@ -190,12 +190,12 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <input type="checkbox" aria-label={`Select ${stack.project}`} checked={Boolean(picked[stack.project])} onChange={() => toggle(stack)} />
                       </label>
                     </td>
-                    <td className="name-cell" title={stack.project} translate="no">
+                    <td className="name-cell cell-name" title={stack.project} translate="no">
                       <Link className="name-link" href={`/e/${id}/stacks/${encodeURIComponent(stack.project)}?tab=stack`} translate="no">{stack.project}</Link>
                     </td>
-                    <td><span className="origin-badge">{stack.origin === "managed" ? "Managed" : "Discovered"}</span></td>
-                    <td><Badge state={stack.state} /></td>
-                    <td className="stack-containers">
+                    <td className="cell-secondary"><span className="origin-badge">{stack.origin === "managed" ? "Managed" : "Discovered"}</span></td>
+                    <td className="cell-status"><Badge state={stack.state} /></td>
+                    <td className="stack-containers cell-meta">
                       <span className="mono">{stack.running}/{stack.total}</span>
                       {stack.containers.map((container) => (
                         <Link key={container.id} className="name-link mono" href={`/e/${id}/containers/${encodeURIComponent(container.id)}`}>

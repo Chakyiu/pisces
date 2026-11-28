@@ -5,7 +5,7 @@ import { ApiError, api } from "../../../../../lib/api";
 import { stamp } from "../../../../../lib/format";
 import type { Volume } from "../../../../../lib/types";
 import { listedNames } from "../../../../../lib/ux";
-import { Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { Dialog, Empty, ErrorState, Icon, Loading, SelectionBar } from "../../../../../components/bits";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
 
@@ -102,9 +102,11 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
           <button className="btn primary" type="button" onClick={() => { setVolumeName(""); setNameError(""); setDriver("local"); setCreate(true); }}>
             <Icon name="plus" /> Create volume
           </button>
-          <button className="btn danger" type="button" disabled={pending || selected.length === 0} onClick={() => setRemove(selected)}>
-            <Icon name="trash" /> Remove
-          </button>
+          <SelectionBar count={selected.length} onClear={() => setPicked({})}>
+            <button className="btn danger" type="button" disabled={pending || selected.length === 0} onClick={() => setRemove(selected)}>
+              <Icon name="trash" /> Remove
+            </button>
+          </SelectionBar>
         </div>
         {query.status === "loading" && !query.data ? <Loading noun="volumes" /> : null}
         {query.status === "error" ? <ErrorState title={`Docker endpoint ${name} is not responding.`} message={query.message} attempts={query.attempts} at={query.at} onRetry={query.retry} /> : null}
@@ -126,9 +128,9 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                 {items.map((item) => (
                   <tr key={item.name}>
                     <td className="col-check"><label className="check"><input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.name])} onChange={() => setPicked((prev) => { const next = { ...prev }; if (next[item.name]) delete next[item.name]; else next[item.name] = item; return next; })} /></label></td>
-                    <td className="name-cell" title={item.name}>{item.name}</td>
-                    <td className="mono">{item.driver}</td>
-                    <td className="mono name-cell" title={item.mountpoint}>
+                    <td className="name-cell cell-name" title={item.name}>{item.name}</td>
+                    <td className="mono cell-secondary">{item.driver}</td>
+                    <td className="mono name-cell cell-meta" title={item.mountpoint}>
                       {item.mountpoint}
                       <button
                         className="icon-btn"
@@ -142,7 +144,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <Icon name="copy" />
                       </button>
                     </td>
-                    <td className="mono">{stamp(item.created)}</td>
+                    <td className="mono cell-meta">{stamp(item.created)}</td>
                   </tr>
                 ))}
               </tbody>

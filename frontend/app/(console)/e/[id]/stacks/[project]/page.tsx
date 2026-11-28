@@ -6,7 +6,7 @@ import { useParams, useRouter } from "next/navigation";
 import { ApiError, api } from "../../../../../../lib/api";
 import { age, portList } from "../../../../../../lib/format";
 import type { Container, StackDetail } from "../../../../../../lib/types";
-import { Badge, Dialog, ErrorState, Icon, Loading } from "../../../../../../components/bits";
+import { Badge, Dialog, ErrorState, Icon, Loading, SelectionBar } from "../../../../../../components/bits";
 import { DockerView, Pager, publishApiError } from "../../../../../../components/gate";
 import { PageFrame } from "../../../../../../components/shell";
 import { composeYamlSyntaxError } from "../../../../../../lib/compose-yaml";
@@ -313,7 +313,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
       {tab === "stack" ? (
         <section id="stack-panel-stack" className="stack-panel" role="tabpanel" aria-labelledby="stack-tab-stack">
           <section className="widget">
-            <div className="widget-head">
+            <div className="widget-head stack-command">
               <div className="widget-title"><Icon name="stacks" /> Stack actions</div>
               <div className="grow" />
               <div className="bulk">
@@ -338,12 +338,12 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
             <div className="widget-head">
               <div className="widget-title"><Icon name="containers" /> Containers</div>
               <div className="grow" />
-              <div className="bulk">
+              <SelectionBar count={selected.length} onClear={() => setPicked({})}>
                 <button className="btn" type="button" disabled={Boolean(pending) || selectedStopped.length === 0} onClick={() => void perform("start", selectedStopped)}>Start</button>
                 <button className="btn" type="button" disabled={Boolean(pending) || selectedRunning.length === 0} onClick={() => void perform("stop", selectedRunning)}>Stop</button>
                 <button className="btn" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => void perform("restart", selected)}>Restart</button>
                 <button className="btn danger" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => setRemove(true)}>Remove</button>
-              </div>
+              </SelectionBar>
             </div>
             {containers.length === 0 ? (
               <div className="state">
@@ -357,10 +357,10 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
                   <tbody>{visible.map((item) => (
                     <tr key={item.id}>
                       <td className="col-check"><label className="check"><input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.id])} onChange={() => setPicked((current) => { const next = { ...current }; if (next[item.id]) delete next[item.id]; else next[item.id] = item; return next; })} /></label></td>
-                      <td className="name-cell"><Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link></td>
-                      <td><Badge state={item.state} /></td>
-                      <td><Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}><Icon name="logs" /></Link></td>
-                      <td className="mono name-cell" title={item.image}>{item.image}</td><td className="mono">{age(item.created)}</td><td className="mono">{portList(item.ports)}</td>
+                      <td className="name-cell cell-name"><Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link></td>
+                      <td className="cell-status"><Badge state={item.state} /></td>
+                      <td className="cell-action icon-action"><Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}><Icon name="logs" /></Link></td>
+                      <td className="mono name-cell cell-secondary" title={item.image}>{item.image}</td><td className="mono cell-meta meta-age">{age(item.created)}</td><td className="mono cell-meta meta-ports">{portList(item.ports)}</td>
                     </tr>
                   ))}</tbody>
                 </table>
@@ -380,7 +380,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
               </p>
               <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} error={compose.trim() && fileError(compose) ? fileError(compose) : ""} />
               <StackEnvEditor value={env} onChange={setEnv} disabled={Boolean(pending)} />
-              <div className="stack-editor-actions">
+              <div className={`stack-editor-actions${dirty ? " is-dirty" : ""}`}>
                 <button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>
                   {pending === "update" ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack"}
                 </button>
@@ -391,7 +391,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
               <p className="stack-note">The stack name stays <span className="mono" translate="no">{project}</span>.</p>
               <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} />
               <StackEnvEditor value={env} onChange={setEnv} disabled={Boolean(pending)} />
-              <div className="stack-editor-actions"><button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>{pending === "update" ? "Updating…" : "Update the stack"}</button></div>
+              <div className={`stack-editor-actions${dirty ? " is-dirty" : ""}`}><button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>{pending === "update" ? "Updating…" : "Update the stack"}</button></div>
             </>
           )}
         </section>

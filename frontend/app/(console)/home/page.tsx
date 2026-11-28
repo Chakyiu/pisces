@@ -99,7 +99,7 @@ export default function HomePage() {
               <div className="widget-title">Environments</div>
               <input className="field search" placeholder="Search environments..." value={q} onChange={(event) => setQ(event.target.value)} />
               <div className="grow" />
-              <select className="select" aria-label="Sort environments" value={sort} onChange={(event) => setSort(event.target.value as SortKey)} style={{ width: 140 }}>
+              <select className="select narrow" aria-label="Sort environments" value={sort} onChange={(event) => setSort(event.target.value as SortKey)}>
                 <option value="name">Name</option>
                 <option value="kind">Kind</option>
                 <option value="status">Status</option>

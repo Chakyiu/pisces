@@ -54,12 +54,17 @@ export function Shell({ children }: { children: ReactNode }) {
   const [menu, setMenu] = useState(false);
   const [open, setOpen] = useState(true);
   const [overlay, setOverlay] = useState(false);
+  const [drawer, setDrawer] = useState(false);
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
   const [navCounts, setNavCounts] = useState<Overview["counts"] | null>(null);
   const [stackTotal, setStackTotal] = useState<number | null>(null);
   const [pendingProposals, setPendingProposals] = useState(0);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const navButtonRef = useRef<HTMLButtonElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const restoreFocus = useRef(false);
 
   const id = pathname.match(/^\/e\/([^/]+)/)?.[1];
   const current = endpoints.find((endpoint) => endpoint.id === id);
@@ -96,12 +101,19 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [session, router]);
 
   useEffect(() => {
-    const width = window.innerWidth;
-    const stored = localStorage.getItem(SIDEBAR_KEY);
-    setOpen(width >= 992 && stored !== "false");
-    setOverlay(width < 561);
+    const phoneNow = () => window.innerWidth < 561;
+    const preferOpen = () => localStorage.getItem(SIDEBAR_KEY) !== "false";
+    setOverlay(phoneNow());
+    setOpen(window.innerWidth >= 992 && preferOpen());
+    let wasPhone = phoneNow();
     function onResize() {
-      setOverlay(window.innerWidth < 561);
+      const phone = phoneNow();
+      setOverlay(phone);
+      if (phone !== wasPhone) {
+        setDrawer(false);
+        if (!phone) setOpen(window.innerWidth >= 992 && preferOpen());
+      }
+      wasPhone = phone;
     }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
@@ -113,8 +125,31 @@ export function Shell({ children }: { children: ReactNode }) {
 
   useEffect(() => { setMenu(false); }, [pathname]);
   useEffect(() => {
-    if (window.innerWidth < 561) setOpen(false);
+    if (window.innerWidth >= 561) return;
+    setDrawer((open) => {
+      if (open) restoreFocus.current = true;
+      return false;
+    });
   }, [pathname]);
+
+  useEffect(() => {
+    if (!drawer) {
+      if (restoreFocus.current) {
+        restoreFocus.current = false;
+        navButtonRef.current?.focus();
+      }
+      return;
+    }
+    const prevHtml = document.documentElement.style.overflow;
+    const prevBody = document.body.style.overflow;
+    document.documentElement.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+    return () => {
+      document.documentElement.style.overflow = prevHtml;
+      document.body.style.overflow = prevBody;
+    };
+  }, [drawer]);
 
   useEffect(() => {
     if (!current || current.kind !== "docker") {
@@ -223,6 +258,40 @@ export function Shell({ children }: { children: ReactNode }) {
     });
   }
 
+  function closeDrawer(restore: boolean) {
+    if (restore) restoreFocus.current = true;
+    setDrawer(false);
+  }
+
+  function openDrawer() {
+    setMenu(false);
+    setDrawer(true);
+  }
+
+  function onDrawerKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeDrawer(true);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const root = drawerRef.current;
+    if (!root) return;
+    const items = Array.from(root.querySelectorAll<HTMLElement>("a[href], button:not([disabled]), input, select, textarea")).filter(
+      (el) => !el.closest("[hidden]") && el.getAttribute("aria-hidden") !== "true",
+    );
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   function navCount(key: NavCountKey) {
     if (key === "stacks") return stackTotal ?? undefined;
     if (!key || !navCounts) return undefined;
@@ -243,13 +312,32 @@ export function Shell({ children }: { children: ReactNode }) {
     setCrumbs,
   };
 
-  const collapsed = !open;
+  const expanded = overlay || open;
+  const collapsed = !expanded;
 
   return (
     <ConsoleCtx.Provider value={value}>
-      <div className={`shell${open ? " sidebar-open" : ""}${overlay ? " overlay" : ""}`}>
-        <aside className={`sidebar${open ? "" : " collapsed"}`}>
-          <Link href="/home" className="brand">{open ? "Pisces" : "P"}</Link>
+      <div className={`shell${open && !overlay ? " sidebar-open" : ""}${overlay ? " overlay" : ""}${drawer ? " drawer-open" : ""}`}>
+        {overlay && drawer ? <div className="nav-scrim" onMouseDown={() => closeDrawer(true)} /> : null}
+        <aside
+          id="app-nav"
+          ref={drawerRef}
+          className={`sidebar${expanded ? "" : " collapsed"}`}
+          role={overlay && drawer ? "dialog" : undefined}
+          aria-modal={overlay && drawer ? true : undefined}
+          aria-label={overlay && drawer ? "Menu" : undefined}
+          aria-hidden={overlay && !drawer ? true : undefined}
+          inert={overlay && !drawer ? true : undefined}
+          onKeyDown={overlay && drawer ? onDrawerKeyDown : undefined}
+        >
+          {overlay ? (
+            <div className="drawer-top">
+              <button ref={closeRef} className="icon-btn" type="button" aria-label="Close menu" onClick={() => closeDrawer(true)}>
+                <Icon name="clear" />
+              </button>
+            </div>
+          ) : null}
+          <Link href="/home" className="brand">{expanded ? "Pisces" : "P"}</Link>
           <nav className="nav" aria-label="Primary">
             <NavLink href="/home" icon="home" label="Home" active={pathname === "/home"} collapsed={collapsed} />
             <EnvSwitcher
@@ -261,7 +349,7 @@ export function Shell({ children }: { children: ReactNode }) {
             />
             {current?.kind === "docker" ? (
               <>
-                {open ? <div className="nav-group-label">Docker</div> : null}
+                {expanded ? <div className="nav-group-label">Docker</div> : null}
                 {DOCKER_NAV.map((item) => {
                   const href = `/e/${current.id}${item.suffix}`;
                   const active = item.suffix === "" ? pathname === `/e/${current.id}` : pathname.startsWith(href);
@@ -281,11 +369,11 @@ export function Shell({ children }: { children: ReactNode }) {
             ) : null}
             {current?.kind === "kubernetes" ? (
               <>
-                {open ? <div className="nav-group-label">Kubernetes</div> : null}
+                {expanded ? <div className="nav-group-label">Kubernetes</div> : null}
                 <K8sNav id={current.id} pathname={pathname} collapsed={collapsed} />
               </>
             ) : null}
-            {open ? <div className="nav-group-label">AI & Security</div> : null}
+            {expanded ? <div className="nav-group-label">AI & Security</div> : null}
             <NavLink href="/ai-access" icon="user" label="AI access" active={pathname === "/ai-access"} collapsed={collapsed} />
             <NavLink
               href="/ai-access/proposals"
@@ -297,9 +385,24 @@ export function Shell({ children }: { children: ReactNode }) {
             />
           </nav>
         </aside>
-        <div className="main">
+        <div className="main" inert={overlay && drawer ? true : undefined}>
           <header className="page-header">
-            <IconButton name="sidebar" label="Toggle sidebar" onClick={toggleSidebar} />
+            {overlay ? (
+              <button
+                ref={navButtonRef}
+                className="icon-btn"
+                type="button"
+                aria-label="Open menu"
+                title="Open menu"
+                aria-expanded={drawer}
+                aria-controls="app-nav"
+                onClick={() => (drawer ? closeDrawer(true) : openDrawer())}
+              >
+                <Icon name="sidebar" />
+              </button>
+            ) : (
+              <IconButton name="sidebar" label="Toggle sidebar" onClick={toggleSidebar} />
+            )}
             <span className="header-rule" aria-hidden="true" />
             <HeaderCrumbs crumbs={crumbs} />
             <div className="header-spacer" />
@@ -389,10 +492,8 @@ export function PageFrame({
           {title}
           {count != null ? <span className="count-pill">{count}</span> : null}
         </h1>
-        <div className="title-actions">
-          {actions}
-          {onRefresh ? <IconButton name="refresh" label="Refresh page" onClick={onRefresh} /> : null}
-        </div>
+        {onRefresh ? <span className="title-refresh"><IconButton name="refresh" label="Refresh page" onClick={onRefresh} /></span> : null}
+        {actions ? <div className="title-actions">{actions}</div> : null}
       </div>
       {children}
     </>

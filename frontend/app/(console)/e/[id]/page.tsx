@@ -117,13 +117,13 @@ function OverviewBody({ id, name }: { id: string; name: string }) {
                   <tbody>
                     {data.recentContainers.map((item) => (
                       <tr key={item.id}>
-                        <td className="name-cell" title={item.name}>
+                        <td className="name-cell cell-name" title={item.name}>
                           <Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link>
                         </td>
-                        <td><Badge state={item.state} /></td>
-                        <td className="mono name-cell" title={item.image}>{item.image}</td>
-                        <td className="mono">{age(item.created)}</td>
-                        <td>
+                        <td className="cell-status"><Badge state={item.state} /></td>
+                        <td className="mono name-cell cell-secondary" title={item.image}>{item.image}</td>
+                        <td className="mono cell-meta">{age(item.created)}</td>
+                        <td className="cell-action icon-action">
                           <Link className="icon-btn" href={`/e/${id}/containers/${encodeURIComponent(item.id)}?tab=logs`} aria-label={`Logs ${item.name}`} title={`Logs ${item.name}`}>
                             <Icon name="logs" />
                           </Link>

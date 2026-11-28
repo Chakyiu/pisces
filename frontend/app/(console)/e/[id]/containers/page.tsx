@@ -7,7 +7,7 @@ import { ApiError, api } from "../../../../../lib/api";
 import { age, imageLabel, portList } from "../../../../../lib/format";
 import type { Container, ImageItem, Page } from "../../../../../lib/types";
 import { listedNames, parsePort } from "../../../../../lib/ux";
-import { Badge, Dialog, Empty, ErrorState, Icon, Loading } from "../../../../../components/bits";
+import { Badge, Dialog, Empty, ErrorState, Icon, Loading, SelectionBar } from "../../../../../components/bits";
 import { AiAccessBadge } from "../../../../../components/container-ai-access";
 import { DockerView, Pager, publishApiError, usePaged } from "../../../../../components/gate";
 import { PageFrame, useConsole } from "../../../../../components/shell";
@@ -116,15 +116,15 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
       <section className="widget">
         <div className="widget-head">
           <input className="field search" placeholder="name or image" value={q} onChange={(event) => setQ(event.target.value)} />
-          <select className="select" aria-label="State" value={state} onChange={(event) => { setState(event.target.value); setOffset(0); }} style={{ width: 140 }}>
+          <select className="select narrow" aria-label="State" value={state} onChange={(event) => { setState(event.target.value); setOffset(0); }}>
             {STATES.map((item) => <option key={item} value={item}>{item === "all" ? "All" : item}</option>)}
           </select>
           <div className="grow" />
-          {selected.length > 0 ? <span className="note">{selected.length} selected</span> : null}
+          {selected.length > 0 ? <span className="note desktop-count">{selected.length} selected</span> : null}
           <button className="btn primary" type="button" onClick={() => setAddOpen(true)}>
             <Icon name="plus" /> Add container
           </button>
-          <div className="bulk">
+          <SelectionBar count={selected.length} onClear={() => setPicked({})}>
             <button className="btn" type="button" disabled={Boolean(pending) || startTargets.length === 0} onClick={() => void act(startTargets, "start")}>
               <Icon name="play" /> {label("start", "Starting…", "Start")}
             </button>
@@ -137,7 +137,7 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
             <button className="btn danger" type="button" disabled={Boolean(pending) || selected.length === 0} onClick={() => setRemove(selected)}>
               <Icon name="trash" /> Remove
             </button>
-          </div>
+          </SelectionBar>
         </div>
         {query.status === "loading" && !query.data ? <Loading noun="containers" /> : null}
         {query.status === "error" ? (
@@ -176,14 +176,14 @@ function Body({ id, name, refreshRef }: { id: string; name: string; refreshRef: 
                         <input type="checkbox" aria-label={`Select ${item.name}`} checked={Boolean(picked[item.id])} onChange={() => toggle(item)} />
                       </label>
                     </td>
-                    <td className="name-cell" title={item.name}>
+                    <td className="name-cell cell-name" title={item.name}>
                       <Link className="name-link" href={`/e/${id}/containers/${encodeURIComponent(item.id)}`}>{item.name}</Link>
                     </td>
-                    <td><Badge state={item.state} /></td>
-                    <td><AiAccessBadge access={item.aiAccess} /></td>
-                    <td className="mono name-cell" title={item.image}>{item.image}</td>
-                    <td className="mono">{age(item.created)}</td>
-                    <td className="mono">{portList(item.ports)}</td>
+                    <td className="cell-status"><Badge state={item.state} /></td>
+                    <td className="cell-meta meta-ai"><AiAccessBadge access={item.aiAccess} /></td>
+                    <td className="mono name-cell cell-secondary" title={item.image}>{item.image}</td>
+                    <td className="mono cell-meta meta-age">{age(item.created)}</td>
+                    <td className="mono cell-meta meta-ports">{portList(item.ports)}</td>
                   </tr>
                 ))}
               </tbody>

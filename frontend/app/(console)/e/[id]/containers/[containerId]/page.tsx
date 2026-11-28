@@ -75,6 +75,7 @@ function Body({
   const [editOpen, setEditOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [recreateOpen, setRecreateOpen] = useState(false);
+  const [more, setMore] = useState(false);
   const [tab, setTab] = useState<ContainerTab>(() => tabFromQuery(searchParams.get("tab")) ?? "inspect");
   const scrollHold = useRef<{ y: number; stageHeight: number } | null>(null);
 
@@ -239,7 +240,7 @@ function Body({
           <strong className="mono" title={detail.name}>{detail.name}</strong>
           <Badge state={detail.state} />
         </div>
-        <div className="bulk" aria-label="Actions">
+        <div className="bulk detail-desktop" aria-label="Actions">
           <button className="btn" type="button" disabled={Boolean(pending) || isRunning} onClick={() => void act("start")}>
             <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
           </button>
@@ -261,6 +262,39 @@ function Body({
           <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
             <Icon name="copy" /> Duplicate/Edit
           </button>
+        </div>
+        <div className="detail-phone">
+          {isRunning ? (
+            <button className="btn primary" type="button" disabled={Boolean(pending)} onClick={() => void act("stop")}>
+              <Icon name="stop" /> {pending === "stop" ? "Stopping…" : "Stop"}
+            </button>
+          ) : (
+            <button className="btn primary" type="button" disabled={Boolean(pending)} onClick={() => void act("start")}>
+              <Icon name="play" /> {pending === "start" ? "Starting…" : "Start"}
+            </button>
+          )}
+          <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => void act("restart")}>
+            <Icon name="restart" /> {pending === "restart" ? "Restarting…" : "Restart"}
+          </button>
+          <button className="btn" type="button" aria-expanded={more} aria-controls="container-more-actions" onClick={() => setMore((value) => !value)}>
+            More actions
+          </button>
+          {more ? (
+            <div className="detail-more" id="container-more-actions">
+              <button className="btn danger" type="button" disabled={Boolean(pending)} onClick={() => setConfirm(true)}>
+                <Icon name="trash" /> Remove
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setRecreateOpen(true)}>
+                <Icon name="refresh" /> {pending === "recreate" ? "Recreating…" : "Recreate"}
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setSettingsOpen(true)}>
+                Edit name / restart
+              </button>
+              <button className="btn" type="button" disabled={Boolean(pending)} onClick={() => setEditOpen(true)}>
+                <Icon name="copy" /> Duplicate/Edit
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
       <div className="tab-stage">

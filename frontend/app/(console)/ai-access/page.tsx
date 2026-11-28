@@ -333,12 +333,12 @@ function CredentialScreen() {
                 <tbody>
                   {openRows.map((row) => (
                     <tr key={`${row.endpointId}:${row.containerId}`}>
-                      <td className="name-cell" title={row.containerName}>
+                      <td className="name-cell cell-name" title={row.containerName}>
                         <Link className="name-link" href={`/e/${row.endpointId}/containers/${encodeURIComponent(row.containerId)}`}>{row.containerName}</Link>
                       </td>
-                      <td>{row.endpointName}</td>
-                      <td>{row.state === "operate" ? "Operate" : "Read"}</td>
-                      <td>
+                      <td className="cell-secondary">{row.endpointName}</td>
+                      <td className="cell-status">{row.state === "operate" ? "Operate" : "Read"}</td>
+                      <td className="cell-action">
                         <button
                           className="btn"
                           type="button"

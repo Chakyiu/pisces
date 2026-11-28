@@ -81,11 +81,10 @@ function ProposalScreen({ refreshRef }: { refreshRef: { current: () => void } })
           <div className="widget-title"><Icon name="containers" /> Pending proposals</div>
           <div className="grow" />
           <select
-            className="select"
+            className="select narrow"
             aria-label="Proposal status"
             value={filter}
             onChange={(event) => setFilter(event.target.value)}
-            style={{ width: 140 }}
           >
             {FILTERS.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
           </select>
@@ -134,17 +133,17 @@ function ProposalScreen({ refreshRef }: { refreshRef: { current: () => void } })
               <tbody>
                 {visible.map((item) => (
                   <tr key={item.id}>
-                    <td>
+                    <td className="cell-name">
                       <strong>{target(item)}</strong>
                       <span className="cell-2">
                         {item.project ? `${environmentName(item.endpointId)} · ${item.project}` : environmentName(item.endpointId)}
                       </span>
                     </td>
-                    <td className="mono">{actionLabel(item.action)}</td>
-                    <td className="mono" title={atTime(item.createdAt)}>{atTime(item.createdAt)}</td>
-                    <td className="mono">{item.status === "pending" ? left(item.expiresAt) : "—"}</td>
-                    <td><StatusCell item={item} /></td>
-                    <td>
+                    <td className="mono cell-secondary">{actionLabel(item.action)}</td>
+                    <td className="mono cell-meta" title={atTime(item.createdAt)}>{atTime(item.createdAt)}</td>
+                    <td className="mono cell-meta">{item.status === "pending" ? left(item.expiresAt) : "—"}</td>
+                    <td className="cell-status"><StatusCell item={item} /></td>
+                    <td className="cell-action">
                       <button className="btn" type="button" onClick={() => setReview(item)}>
                         {item.status === "pending" ? "Review" : "View"}
                       </button>
