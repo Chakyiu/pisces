@@ -74,13 +74,15 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
   const [pendingHref, setPendingHref] = useState("");
   const adopting = Boolean(detail && (detail.origin === "discovered" || !detail.hasFile));
   const envDirty = envFingerprint(env) !== savedEnv;
+  const composeProblem = fileError(compose);
   const dirty = adopting
-    ? Boolean((compose.trim() && !fileError(compose)) || envDirty)
+    ? Boolean(compose.trim() || envDirty)
     : Boolean(
         detail?.origin === "managed" &&
           detail.hasFile &&
           (compose !== (detail.compose ?? "") || envDirty),
       );
+  const shownComposeError = dirty && composeProblem ? composeProblem : "";
   const containers = detail?.containerDetails ?? [];
   const visible = containers.slice(offset, offset + 50);
   const selected = visible.filter((container) => picked[container.id]);
@@ -264,11 +266,23 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
     }
   }
 
-  async function updateStack() {
-    setPending("update");
+  function requestUpdate() {
+    if (composeProblem) return;
     setAlert("");
     setStatus("");
+    setConfirmUpdate(true);
+  }
+
+  async function updateStack() {
+    if (composeProblem) {
+      setAlert(composeProblem);
+      return;
+    }
+    setPending("update");
+    setAlert("");
+    setStatus("Redeploying this stack.");
     const slowTimer = window.setTimeout(() => setStatus("Taking longer than expected. Image pulls can take a minute."), 15_000);
+    let succeeded = false;
     try {
       await api(`/api/endpoints/${id}/stacks/${encodeURIComponent(project)}`, {
         method: "PUT",
@@ -276,16 +290,32 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
         timeoutMs: 310_000,
         failureMessage: LOST_REQUEST,
       });
-      await load();
-      setStatus(adopting ? `Replaced ${project}.` : `Updated ${project}.`);
+      succeeded = true;
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : "The engine did not answer.";
-      if (err instanceof ApiError) publishApiError(err.code);
-      setAlert(`${adopting ? "Replace" : "Update"} failed. ${message}`);
+      const verb = adopting ? "Replace" : "Update";
+      setStatus("");
+      if (err instanceof ApiError && err.code === "cancelled") {
+        setAlert(`${verb} cancelled. The engine may still be applying it.`);
+      } else {
+        const message = err instanceof ApiError ? err.message : "The engine did not answer.";
+        if (err instanceof ApiError) publishApiError(err.code);
+        setAlert(`${verb} failed. ${message}`);
+      }
     } finally {
       window.clearTimeout(slowTimer);
+      if (!succeeded) setPending("");
+      else setConfirmUpdate(false);
+    }
+    if (!succeeded) return;
+    const success = adopting ? `Replaced ${project}.` : `Updated ${project}.`;
+    try {
+      await load();
+      // A failed refresh must not replace a finished deploy with the full-page error.
+      setError("");
+      setNotFound(false);
+      setStatus(success);
+    } finally {
       setPending("");
-      setConfirmUpdate(false);
     }
   }
 
@@ -304,7 +334,7 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
 
   return (
     <div className="stack-panel">
-      {alert ? <div className="alert bad" role="alert">{alert}</div> : null}
+      {alert && !confirmUpdate ? <div className="alert bad" role="alert">{alert}</div> : null}
       {status ? <div className="stack-status" role="status" aria-live="polite">{status}</div> : null}
       <div className="stack-tabs" role="tablist" aria-label="Stack views" onKeyDown={tabKey}>
         <button id="stack-tab-stack" className="stack-tab" type="button" role="tab" aria-selected={tab === "stack"} aria-controls="stack-panel-stack" onClick={() => chooseTab("stack")}>Stack</button>
@@ -378,10 +408,10 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
                   ? <>Pisces found <span className="mono" translate="no">{project}</span> from container labels on {endpointName}. Paste a Compose file below to store it in Pisces and redeploy this stack. The stack name stays <span className="mono" translate="no">{project}</span>.</>
                   : <>Pisces has a record for {project} on {endpointName}, but the Compose file is missing. Paste a file below to store and redeploy it. The stack name stays <span className="mono" translate="no">{project}</span>.</>}
               </p>
-              <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} error={compose.trim() && fileError(compose) ? fileError(compose) : ""} />
+              <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} error={shownComposeError} />
               <StackEnvEditor value={env} onChange={setEnv} disabled={Boolean(pending)} />
               <div className={`stack-editor-actions${dirty ? " is-dirty" : ""}`}>
-                <button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>
+                <button className="btn primary" type="button" disabled={Boolean(pending) || !dirty || Boolean(composeProblem)} onClick={requestUpdate}>
                   {pending === "update" ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack"}
                 </button>
               </div>
@@ -389,9 +419,9 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
           ) : (
             <>
               <p className="stack-note">The stack name stays <span className="mono" translate="no">{project}</span>.</p>
-              <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} />
+              <ComposeEditor value={compose} onChange={setCompose} disabled={Boolean(pending)} error={shownComposeError} />
               <StackEnvEditor value={env} onChange={setEnv} disabled={Boolean(pending)} />
-              <div className={`stack-editor-actions${dirty ? " is-dirty" : ""}`}><button className="btn primary" type="button" disabled={Boolean(pending) || !dirty} onClick={() => setConfirmUpdate(true)}>{pending === "update" ? "Updating…" : "Update the stack"}</button></div>
+              <div className={`stack-editor-actions${dirty ? " is-dirty" : ""}`}><button className="btn primary" type="button" disabled={Boolean(pending) || !dirty || Boolean(composeProblem)} onClick={requestUpdate}>{pending === "update" ? "Updating…" : "Update the stack"}</button></div>
             </>
           )}
         </section>
@@ -423,7 +453,9 @@ function Body({ id, project, endpointName, refreshRef }: { id: string; project: 
               : `Pisces will redeploy this Compose file on ${endpointName}. Services that this file no longer defines are removed. Named volumes stay.`}
           </p>
           <StackUpdatePreview beforeCompose={detail.compose ?? ""} compose={compose} savedEnv={savedEnv} env={env} />
-          <div className="dialog-actions"><button className="btn" data-focus="first" type="button" onClick={() => setConfirmUpdate(false)}>Cancel</button><button className="btn primary" type="button" disabled={pending === "update"} onClick={() => void updateStack()}>{pending === "update" ? (adopting ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : "Updating…") : adopting ? (detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack") : "Update the stack"}</button></div>
+          {pending === "update" ? <p className="help" role="status">{status || "Redeploying this stack."}</p> : null}
+          {alert ? <p className="field-error" role="alert">{alert}</p> : null}
+          <div className="dialog-actions"><button className="btn" data-focus="first" type="button" onClick={() => setConfirmUpdate(false)}>Cancel</button><button className="btn primary" type="button" disabled={pending === "update" || Boolean(composeProblem)} onClick={() => void updateStack()}>{pending === "update" ? (adopting ? (detail.origin === "discovered" ? "Replacing…" : "Deploying…") : "Updating…") : adopting ? (detail.origin === "discovered" ? "Replace the stack" : "Deploy the stack") : "Update the stack"}</button></div>
         </Dialog>
       ) : null}
       {confirmDelete ? (

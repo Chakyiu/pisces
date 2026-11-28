@@ -207,6 +207,9 @@ async fn run(
             command.arg("--force-recreate");
         }
     }
+    // Inherited stdin lets Compose wait on a registry prompt. The UI then stays
+    // on Updating until the apply timeout, or longer if the process is not killed.
+    command.stdin(std::process::Stdio::null());
     command.kill_on_drop(true);
     let child = command
         .spawn()

@@ -1,7 +1,7 @@
 "use client";
 
-import { useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
-import { composeForEditor } from "../../../../../lib/compose-yaml";
+import { useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from "react";
+import { applyComposeTab, composeForEditor } from "../../../../../lib/compose-yaml";
 
 export function ComposeEditor({
   value,
@@ -17,10 +17,28 @@ export function ComposeEditor({
   const area = useRef<HTMLTextAreaElement>(null);
   const gutter = useRef<HTMLPreElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const pendingSelection = useRef<{ start: number; end: number } | null>(null);
   const [copyState, setCopyState] = useState("");
   const [copyError, setCopyError] = useState("");
   const [fileError, setFileError] = useState("");
   const lineCount = Math.max(1, value.split("\n").length);
+
+  useLayoutEffect(() => {
+    const sel = pendingSelection.current;
+    const field = area.current;
+    if (!sel || !field) return;
+    pendingSelection.current = null;
+    field.selectionStart = sel.start;
+    field.selectionEnd = sel.end;
+  }, [value]);
+
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Tab" || disabled) return;
+    event.preventDefault();
+    const next = applyComposeTab(event.currentTarget.value, event.currentTarget.selectionStart, event.currentTarget.selectionEnd, event.shiftKey);
+    pendingSelection.current = { start: next.selectionStart, end: next.selectionEnd };
+    onChange(next.value);
+  }
 
   async function loadFile(event: ChangeEvent<HTMLInputElement>) {
     setFileError("");
@@ -102,12 +120,13 @@ export function ComposeEditor({
           value={value}
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
+          onKeyDown={onKeyDown}
           onPaste={paste}
           onScroll={(event) => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }}
         />
       </div>
       <div className="compose-caption-row">
-        <p id="compose-caption" className="help">Ctrl+F or ⌘F to search</p>
+        <p id="compose-caption" className="help">Tab inserts spaces. Ctrl+F or ⌘F to search</p>
         <span className="help" role="status" aria-live="polite">{copyState || copyError}</span>
       </div>
       {fileError ? <p className="field-error" role="alert">{fileError}</p> : null}

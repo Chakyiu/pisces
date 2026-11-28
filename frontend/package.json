@@ -8,7 +8,9 @@
     "start": "next start -p 3000",
     "lint": "eslint .",
     "test:proposal-view": "node --test lib/proposal-view.test.mjs",
-    "test:proxy-budget": "node --test lib/proxy-budget.test.mjs"
+    "test:proxy-budget": "node --test lib/proxy-budget.test.mjs",
+    "test:compose-yaml": "node --test lib/compose-yaml.test.mjs",
+    "test:api": "node --test lib/api.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "0.10.0",
