@@ -223,24 +223,156 @@ async fn run(
     if output.status.success() {
         return Ok(());
     }
-    let message = String::from_utf8_lossy(&output.stderr);
-    let tail = message
-        .trim()
-        .chars()
-        .rev()
-        .take(1000)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect::<String>();
-    let tail = if tail.is_empty() {
+    Err(ApiError::deploy(format!(
+        "Compose failed. Some services may already have changed. {}",
+        compose_failure_tail(&output.stdout, &output.stderr)
+    )))
+}
+
+/// `up --detach` returns success once the container process has started, including
+/// when that process has already exited. Callers that just updated a stack use this
+/// to avoid saving a deploy that did not stay up.
+/// shortcut: a service that is still running here and crashes later is saved,
+/// revisit if a crash-after-start shows up as a silent rollback.
+pub fn services_that_did_not_stay_up(ps_output: &str) -> Result<Vec<String>, ()> {
+    let mut failed = Vec::new();
+    for row in compose_ps_rows(ps_output)? {
+        let state = ps_str(&row, "State");
+        let service = {
+            let service = ps_str(&row, "Service");
+            if !service.is_empty() {
+                service.to_string()
+            } else {
+                let name = ps_str(&row, "Name");
+                if name.is_empty() {
+                    "a service".to_string()
+                } else {
+                    name.to_string()
+                }
+            }
+        };
+        let code = ps_exit_code(&row);
+        let health = ps_str(&row, "Health");
+        if state == "running" && health == "unhealthy" {
+            failed.push(format!("{service} is unhealthy"));
+            continue;
+        }
+        let detail = match state {
+            "running" | "paused" => None,
+            "exited" if code == 0 => None,
+            "exited" => Some(format!("{service} exited with status {code}")),
+            "restarting" => Some(format!("{service} is restarting")),
+            "" if code != 0 => Some(format!("{service} exited with status {code}")),
+            "" => None,
+            other => Some(format!("{service} is {other}")),
+        };
+        if let Some(detail) = detail {
+            failed.push(detail);
+        }
+    }
+    Ok(failed)
+}
+
+pub fn update_not_saved(reason: &str, restore: Result<(), &str>) -> String {
+    let base = format!("{reason} The update was not saved.");
+    match restore {
+        Ok(()) => format!("{base} The previous stack was restored."),
+        Err(error) => format!("{base} Restoring the previous stack also failed. {error}"),
+    }
+}
+
+pub async fn compose_ps(
+    project: &str,
+    directory: &Path,
+    compose_file: &Path,
+    env_file: Option<&Path>,
+) -> Result<String, ApiError> {
+    let mut command = Command::new("docker");
+    command
+        .arg("compose")
+        .arg("--project-directory")
+        .arg(directory)
+        .arg("--project-name")
+        .arg(project)
+        .arg("--file")
+        .arg(compose_file);
+    if let Some(path) = env_file.filter(|path| path.is_file()) {
+        command.arg("--env-file").arg(path);
+    }
+    command.args(["ps", "--all", "--format", "json"]);
+    command.stdin(std::process::Stdio::null());
+    command.kill_on_drop(true);
+    let child = command
+        .spawn()
+        .map_err(|error| ApiError::deploy(format!("Could not read Compose status: {error}")))?;
+    let output = child.wait_with_output();
+    tokio::pin!(output);
+    let output = tokio::time::timeout(Duration::from_secs(30), &mut output)
+        .await
+        .map_err(|_| ApiError::deploy("Could not read Compose status."))?
+        .map_err(|error| ApiError::deploy(format!("Could not read Compose status: {error}")))?;
+    if !output.status.success() {
+        return Err(ApiError::deploy(format!(
+            "Could not read Compose status. {}",
+            compose_failure_tail(&output.stdout, &output.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn compose_failure_tail(stdout: &[u8], stderr: &[u8]) -> String {
+    let err = String::from_utf8_lossy(stderr);
+    let out = String::from_utf8_lossy(stdout);
+    let text = if !err.trim().is_empty() {
+        err.trim()
+    } else {
+        out.trim()
+    };
+    let tail: String = text.chars().rev().take(1000).collect();
+    let tail: String = tail.chars().rev().collect();
+    if tail.is_empty() {
         "Compose exited unsuccessfully.".to_string()
     } else {
         tail
-    };
-    Err(ApiError::deploy(format!(
-        "Compose failed. Some services may already have changed. {tail}"
-    )))
+    }
+}
+
+fn compose_ps_rows(ps_output: &str) -> Result<Vec<serde_json::Value>, ()> {
+    let trimmed = ps_output.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        return serde_json::from_str(trimmed).map_err(|_| ());
+    }
+    let mut rows = Vec::new();
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        rows.push(serde_json::from_str(line).map_err(|_| ())?);
+    }
+    Ok(rows)
+}
+
+fn ps_str<'a>(row: &'a serde_json::Value, name: &str) -> &'a str {
+    row.get(name)
+        .or_else(|| row.get(name.to_ascii_lowercase()))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
+fn ps_exit_code(row: &serde_json::Value) -> i64 {
+    let value = row
+        .get("ExitCode")
+        .or_else(|| row.get("exitcode"))
+        .or_else(|| row.get("Exitcode"));
+    match value {
+        Some(value) if value.is_i64() || value.is_u64() => value.as_i64().unwrap_or(0),
+        Some(value) => value.as_str().unwrap_or("0").parse().unwrap_or(0),
+        None => 0,
+    }
 }
 
 #[cfg(test)]
@@ -273,6 +405,63 @@ mod tests {
         let yaml = compose_for_editor(json);
         assert!(yaml.contains("services:"));
         assert!(yaml.contains("image: nginx"));
+    }
+
+    #[test]
+    fn editor_normalization_keeps_a_changed_image() {
+        let shown = compose_for_editor("services:\n  web:\n    image: nginx:1.27\n");
+        assert!(shown.contains("nginx:1.27"), "{shown}");
+    }
+
+    #[test]
+    fn detach_success_is_not_saved_when_a_service_has_already_exited() {
+        let ps = r#"{"Command":"\"sh -c exit 1\"","ExitCode":1,"Health":"","Name":"demo-web-1","Service":"web","State":"exited"}"#;
+        let failed = services_that_did_not_stay_up(ps).unwrap();
+        assert_eq!(failed, vec!["web exited with status 1".to_string()]);
+        let message = update_not_saved(
+            &format!("Compose finished, but {}.", failed.join("; ")),
+            Ok(()),
+        );
+        assert!(message.contains("web exited with status 1"));
+        assert!(message.contains("The update was not saved."));
+        assert!(message.contains("The previous stack was restored."));
+        assert!(!message.to_lowercase().contains("updated"));
+    }
+
+    #[test]
+    fn a_one_shot_exit_and_a_running_service_can_be_saved() {
+        let ps = "{\"Service\":\"migrate\",\"State\":\"exited\",\"ExitCode\":0}\n{\"Service\":\"web\",\"State\":\"running\",\"ExitCode\":0,\"Health\":\"starting\"}";
+        assert!(services_that_did_not_stay_up(ps).unwrap().is_empty());
+        assert!(services_that_did_not_stay_up("").unwrap().is_empty());
+        assert!(services_that_did_not_stay_up("   \n").unwrap().is_empty());
+    }
+
+    #[test]
+    fn restarting_or_unhealthy_services_fail_the_update() {
+        let ps = "[{\"Service\":\"web\",\"State\":\"restarting\",\"ExitCode\":1},{\"Service\":\"api\",\"State\":\"running\",\"Health\":\"unhealthy\",\"ExitCode\":0}]";
+        let failed = services_that_did_not_stay_up(ps).unwrap();
+        assert_eq!(
+            failed,
+            vec![
+                "web is restarting".to_string(),
+                "api is unhealthy".to_string(),
+            ]
+        );
+        let message = update_not_saved("Could not read Compose status.", Err("engine refused"));
+        assert!(message.contains("Could not read Compose status."));
+        assert!(message.contains("Restoring the previous stack also failed. engine refused"));
+        assert!(message.contains("The update was not saved."));
+    }
+
+    #[test]
+    fn compose_status_that_is_not_json_is_not_treated_as_success() {
+        assert!(services_that_did_not_stay_up("not json").is_err());
+    }
+
+    #[test]
+    fn compose_failure_uses_stdout_when_stderr_is_empty() {
+        let tail = compose_failure_tail(b"container web exited (1)", b"  \n");
+        assert_eq!(tail, "container web exited (1)");
     }
 
     #[test]
