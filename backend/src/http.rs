@@ -1796,24 +1796,69 @@ async fn apply_stack_update(
         )?;
     }
     let env_file = stack_env_for_apply(&dir);
-    if let Err(error) = stacks::up(
-        &project,
-        &dir,
-        &dir.join("compose.yaml.new"),
-        env_file.as_deref(),
-        true,
-    )
-    .await
-    {
-        let _ = std::fs::remove_file(dir.join("compose.yaml.new"));
-        let _ = std::fs::remove_file(stacks::staged_env_file(&dir));
+    let candidate = dir.join("compose.yaml.new");
+    if let Err(error) = stacks::up(&project, &dir, &candidate, env_file.as_deref(), true).await {
+        discard_staged_update(&dir);
         lock(state).record_stack_error(&endpoint.id, &project, &error.message);
         return Err(error);
     }
+    confirm_update_stayed_up(
+        state,
+        &endpoint.id,
+        &project,
+        &dir,
+        &candidate,
+        env_file.as_deref(),
+    )
+    .await?;
     lock(state)
         .commit_stack_file(&endpoint.id, &project)
         .map_err(ApiError::deploy)?;
     Ok(())
+}
+
+fn discard_staged_update(dir: &std::path::Path) {
+    let _ = std::fs::remove_file(dir.join("compose.yaml.new"));
+    let _ = std::fs::remove_file(stacks::staged_env_file(dir));
+}
+
+async fn restore_previous_stack(project: &str, dir: &std::path::Path) -> Result<(), ApiError> {
+    let previous = dir.join("compose.yaml");
+    if !previous.is_file() {
+        return Err(ApiError::deploy(
+            "The previous Compose file is missing, so the running stack could not be restored.",
+        ));
+    }
+    let env_file = stack_env_for_apply(dir);
+    stacks::up(project, dir, &previous, env_file.as_deref(), true).await
+}
+
+/// `up --detach` can return success after replacing containers that then exit.
+/// Do not commit that file. Put the last saved Compose file back and surface the error.
+async fn confirm_update_stayed_up(
+    state: &AppState,
+    endpoint_id: &str,
+    project: &str,
+    dir: &std::path::Path,
+    candidate: &std::path::Path,
+    env_file: Option<&std::path::Path>,
+) -> Result<(), ApiError> {
+    let reason = match stacks::compose_ps(project, dir, candidate, env_file).await {
+        Ok(output) => match stacks::services_that_did_not_stay_up(&output) {
+            Ok(failed) if failed.is_empty() => return Ok(()),
+            Ok(failed) => format!("Compose finished, but {}.", failed.join("; ")),
+            Err(()) => "Could not read Compose status.".to_string(),
+        },
+        Err(error) => error.message,
+    };
+    discard_staged_update(dir);
+    let restore = restore_previous_stack(project, dir).await;
+    let message = match &restore {
+        Ok(()) => stacks::update_not_saved(&reason, Ok(())),
+        Err(error) => stacks::update_not_saved(&reason, Err(error.message.as_str())),
+    };
+    lock(state).record_stack_error(endpoint_id, project, &message);
+    Err(ApiError::deploy(message))
 }
 
 async fn stack_compose_lifecycle(
