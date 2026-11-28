@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { Agent } from "undici";
+import { proxyTimeoutMs } from "../../../lib/proxy-budget";
 
 export const dynamic = "force-dynamic";
 
@@ -37,36 +38,22 @@ async function proxy(req: NextRequest, ctx: { params: Promise<{ path: string[] }
   const host = req.headers.get("host");
   if (host) headers.set("x-forwarded-host", host);
 
-  // Log and stats follow are long-lived streams: they must outlive the 10 s abort
-  // every other call gets. The Rust side serves them with no collection timeout.
-  const streaming = /\/(logs|stats)\/stream$/.test(`/${path.join("/")}`);
-
-  // Duplicate/Edit and Recreate stop a container inside the engine call, so
-  // they need the same exemption from the 10 s abort as the log stream — with
-  // a bound, because they are supposed to finish.
   const pathname = `/${path.join("/")}`;
-  const stackApply = (req.method === "POST" && /\/stacks$/.test(pathname))
-    || ((req.method === "PUT" || req.method === "DELETE") && /\/stacks\/[^/]+$/.test(pathname))
-    || (req.method === "POST" && /\/stacks\/[^/]+\/(start|stop|restart)$/.test(pathname));
-  const slow = /\/(duplicate|recreate)$/.test(pathname);
+  const timeoutMs = proxyTimeoutMs(req.method, pathname);
 
   const init: RequestInit = {
     method: req.method,
     headers,
     redirect: "manual",
   };
-  if (streaming) {
+  if (timeoutMs === null) {
     // Tie the upstream stream to this request: when the browser aborts (Follow
     // off, navigation away) the Rust side must see the connection close too,
     // instead of following a container nobody is watching.
     init.signal = req.signal;
     (init as RequestInit & { dispatcher: Agent }).dispatcher = followDispatcher;
-  } else if (stackApply) {
-    init.signal = AbortSignal.timeout(310_000);
-  } else if (slow) {
-    init.signal = AbortSignal.timeout(120_000);
   } else {
-    init.signal = AbortSignal.timeout(10_000);
+    init.signal = AbortSignal.timeout(timeoutMs);
   }
   if (req.method !== "GET" && req.method !== "HEAD") {
     init.body = await req.arrayBuffer();
