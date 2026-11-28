@@ -1,7 +1,8 @@
 "use client";
 
-import { useLayoutEffect, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from "react";
+import { useLayoutEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent, type KeyboardEvent } from "react";
 import { applyComposeTab, composeForEditor } from "../../../../../lib/compose-yaml";
+import { highlightCompose } from "../../../../../lib/compose-highlight";
 
 export function ComposeEditor({
   value,
@@ -16,12 +17,21 @@ export function ComposeEditor({
 }) {
   const area = useRef<HTMLTextAreaElement>(null);
   const gutter = useRef<HTMLPreElement>(null);
+  const highlight = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const pendingSelection = useRef<{ start: number; end: number } | null>(null);
   const [copyState, setCopyState] = useState("");
   const [copyError, setCopyError] = useState("");
   const [fileError, setFileError] = useState("");
   const lineCount = Math.max(1, value.split("\n").length);
+  const colored = useMemo(() => highlightCompose(value), [value]);
+
+  function syncScroll() {
+    const field = area.current;
+    if (!field) return;
+    if (gutter.current) gutter.current.scrollTop = field.scrollTop;
+    if (highlight.current) highlight.current.style.transform = `translate(${-field.scrollLeft}px, ${-field.scrollTop}px)`;
+  }
 
   useLayoutEffect(() => {
     const sel = pendingSelection.current;
@@ -31,6 +41,10 @@ export function ComposeEditor({
     field.selectionStart = sel.start;
     field.selectionEnd = sel.end;
   }, [value]);
+
+  useLayoutEffect(() => {
+    syncScroll();
+  });
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.key !== "Tab" || disabled) return;
@@ -106,24 +120,37 @@ export function ComposeEditor({
       <p id="compose-hint" className="help">This form does not upload a build directory. Set stack environment variables in the section below; Pisces writes <span className="mono">stack.env</span> for deploy. Images must be ones the engine can pull.</p>
       <div className="compose-well">
         <pre className="compose-gutter" aria-hidden="true" ref={gutter}>{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre>
-        <textarea
-          ref={area}
-          className="compose-area"
-          name="compose-file"
-          aria-labelledby="compose-heading"
-          aria-describedby={`compose-caption compose-hint${error ? " compose-error" : ""}`}
-          aria-invalid={Boolean(error)}
-          autoComplete="off"
-          spellCheck={false}
-          lang="yaml"
-          data-language="yaml"
-          value={value}
-          disabled={disabled}
-          onChange={(event) => onChange(event.target.value)}
-          onKeyDown={onKeyDown}
-          onPaste={paste}
-          onScroll={(event) => { if (gutter.current) gutter.current.scrollTop = event.currentTarget.scrollTop; }}
-        />
+        <div className={disabled ? "compose-edit is-disabled" : "compose-edit"}>
+          <div className="compose-highlight" aria-hidden="true">
+            <div className="compose-highlight-inner" ref={highlight}>
+              {colored.map((tokens, lineIndex) => (
+                <div className="compose-line" key={lineIndex}>
+                  {tokens.map((token, tokenIndex) => (
+                    <span key={tokenIndex} className={token.type === "plain" ? undefined : `tok-${token.type}`}>{token.text}</span>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+          <textarea
+            ref={area}
+            className="compose-area"
+            name="compose-file"
+            aria-labelledby="compose-heading"
+            aria-describedby={`compose-caption compose-hint${error ? " compose-error" : ""}`}
+            aria-invalid={Boolean(error)}
+            autoComplete="off"
+            spellCheck={false}
+            lang="yaml"
+            data-language="yaml"
+            value={value}
+            disabled={disabled}
+            onChange={(event) => onChange(event.target.value)}
+            onKeyDown={onKeyDown}
+            onPaste={paste}
+            onScroll={syncScroll}
+          />
+        </div>
       </div>
       <div className="compose-caption-row">
         <p id="compose-caption" className="help">Tab inserts spaces. Ctrl+F or ⌘F to search</p>
